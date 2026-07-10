@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Холст</title>
+<style>
+  html,body{margin:0;height:100%;background:#050505;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+  #stage{position:relative;width:100vw;height:100vh;background:radial-gradient(ellipse at 50% 42%, #32353a 0%, #24262a 32%, #16181c 62%, #0d0f11 100%);overflow:hidden;touch-action:none;}
+  #world{position:absolute;transform-origin:50% 50%;}
+  #ghost{position:absolute;left:0;top:0;}
+  #front{position:absolute;left:0;top:0;}
+  #notes{position:absolute;left:0;top:0;}
+  .frame{box-sizing:border-box;position:absolute;border:1px solid rgba(255,255,255,.65);box-shadow:0 8px 60px 12px rgba(0,0,0,.5);background:#f4f2ee;border-radius:var(--corner-r);}
+  /* lives OUTSIDE #world (not scaled with it) so its thickness stays
+     constant in screen pixels no matter how far the camera has zoomed.
+     Its border-radius is set from JS (screen px = world radius * viewZoom)
+     so the rounded corner visually tracks the frame's radius at any zoom. */
+  #focusRing{position:absolute;left:0;top:0;box-sizing:border-box;pointer-events:none;border:2px solid rgba(150,255,175,.95);box-shadow:0 0 16px 2px rgba(150,255,175,.45);opacity:0;transition:opacity .15s ease;}
+  .handleZone{position:absolute;width:44px;height:44px;display:flex;align-items:center;justify-content:center;margin-left:-22px;margin-top:-22px;}
+  .handleZone.tl{cursor:nwse-resize;}
+  .handleZone.tr{cursor:nesw-resize;}
+  .handleZone.bl{cursor:nesw-resize;}
+  .handleZone.br{cursor:nwse-resize;}
+  .handle{width:11px;height:11px;border-radius:3px;background:rgba(255,255,255,.9);border:1px solid rgba(0,0,0,.35);opacity:0;transition:opacity .12s ease;}
+  .handleZone:hover .handle{opacity:1;}
+  .ratioTag{position:absolute;color:rgba(255,255,255,.7);font-size:11px;background:rgba(0,0,0,.55);padding:3px 7px;border-radius:5px;opacity:0;transition:opacity .12s ease;pointer-events:none;}
+  #toolbar{position:absolute;top:22px;left:50%;transform:translateX(-50%);display:flex;gap:6px;padding:8px;border-radius:14px;background:rgba(255,255,255,.05);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.08);}
+  #toolbar button{width:38px;height:38px;border-radius:9px;border:none;background:transparent;color:rgba(255,255,255,.55);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:box-shadow .15s ease;}
+  #toolbar button.active{background:rgba(255,255,255,.14);color:#fff;}
+  #toolbar button.locate{box-shadow:inset 0 0 0 2px rgba(150,255,175,.95), 0 0 10px 1px rgba(150,255,175,.45);}
+  #zoom{position:absolute;bottom:24px;right:24px;display:flex;gap:8px;align-items:center;color:rgba(255,255,255,.4);font-size:12px;}
+  #zoom button{width:28px;height:28px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:rgba(255,255,255,.6);cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="world">
+    <canvas id="ghost"></canvas>
+    <canvas id="notes"></canvas>
+    <div class="frame" id="frameBox"></div>
+    <canvas id="front"></canvas>
+    <div class="ratioTag" id="ratioTag"></div>
+  </div>
+  <div id="focusRing"></div>
+  <div class="handleZone tl" data-corner="tl"><div class="handle"></div></div>
+  <div class="handleZone tr" data-corner="tr"><div class="handle"></div></div>
+  <div class="handleZone bl" data-corner="bl"><div class="handle"></div></div>
+  <div class="handleZone br" data-corner="br"><div class="handle"></div></div>
+
+  <div id="toolbar">
+    <button data-tool="pen" class="active" title="Перо">✏</button>
+    <button data-tool="eraser" title="Ластик">⌫</button>
+    <button id="clearBtn" title="Очистить">✕</button>
+  </div>
+
+  <div id="zoom">
+    <button id="zOut">–</button>
+    <span id="zLabel">100%</span>
+    <button id="zIn">+</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  const stage = document.getElementById('stage');
+  const world = document.getElementById('world');
+  const ghost = document.getElementById('ghost');
+  const front = document.getElementById('front');
+  const fctx = front.getContext('2d');
+  const notes = document.getElementById('notes');
+  const nctx = notes.getContext('2d');
+  const frameBox = document.getElementById('frameBox');
+  const focusRing = document.getElementById('focusRing');
+  const zLabel = document.getElementById('zLabel');
+  const ratioTag = document.getElementById('ratioTag');
+  const penBtn = document.querySelector('#toolbar button[data-tool="pen"]');
+
+  let DPR = Math.min(window.devicePixelRatio || 1, 2);
+  let W, H, CW, CH;
+  // the canvas bitmaps (ghost/front/notes) are a finite window onto an
+  // otherwise-unbounded logical coordinate space — canvasOriginX/Y is the
+  // logical point that maps to the buffer's pixel (0,0). frame.x/y and every
+  // stroke stay in pure logical space forever and never need to change;
+  // only this window's position/size adapts to follow the camera.
+  let canvasOriginX = 0, canvasOriginY = 0;
+  // frame now stores its own top-left position explicitly (world coords),
+  // not derived from center — needed so the top-left handle can resize
+  // around a fixed opposite (bottom-right) anchor point.
+  let frame = { x:0, y:0, w:640, h:360 };
+  // corner rounding, in world px — handles/clip/selection all key off this
+  // single constant, while frame.x/y/w/h keep describing the *virtual*
+  // sharp-cornered rectangle the round corner is carved out of
+  // corner rounding — kept proportional to the frame's own size (ratio set
+  // by the initial 640×360 frame at 18px) so it looks the same whether the
+  // window has been resized bigger or smaller, instead of a fixed px value
+  // that reads as "more/less rounded" purely because the frame changed size
+  let CORNER_R = 18;
+  const CORNER_RATIO = CORNER_R / Math.min(frame.w, frame.h);
+  function updateCornerRadius(){
+    CORNER_R = Math.max(4, Math.min(frame.w, frame.h) * CORNER_RATIO);
+    frameBox.style.setProperty('--corner-r', CORNER_R+'px');
+  }
+  let tool = 'pen';
+  let drawing = false;
+  // true while ANY corner handle is being dragged — hides the "click to
+  // recenter" ring during a resize/zoom/format drag so it doesn't fire
+  // just because the cursor happens to pass over the window mid-drag
+  let cornerDragging = false;
+  let last = null;
+  let viewZoom = 1;
+  // camera pan (screen px, applied outside the zoom scale so wheel-pan
+  // distance feels the same regardless of current zoom level)
+  let panX = 0, panY = 0;
+  // eased pan destination while animating back to center; null = not animating
+  let panTarget = null;
+  let panFrom = null, panStart = 0;
+  const PAN_DURATION = 650; // ms
+  // critically-damped "docking" curve: brisk approach, then a distinct,
+  // resistance-like slow-down right at the end — reads as the window being
+  // pulled into place and fixed, not just arriving. No overshoot/bounce.
+  const DOCK_W = 7;
+  function easeDock(t){
+    if(t>=1) return 1;
+    return 1 - (1+DOCK_W*t)*Math.exp(-DOCK_W*t);
+  }
+  // is the window currently near the middle of the viewport? Drives the
+  // "come back and click to recenter" affordance once the camera has
+  // panned away from it.
+  let focused = true;
+  let ringVisible = false;
+  const FOCUS_SNAP = 60;
+
+  // One continuous drawing on an infinite world surface. Every segment is
+  // stored once, in absolute world coordinates, regardless of whether it's
+  // currently inside or outside the window — "inside vs outside" is not a
+  // property of the data, it's recomputed at render time from `frame`.
+  let strokeSegments = [];
+  // ghost/background-duplicate layer intentionally removed from the active
+  // logic (see brief) — the `ghost` canvas element stays in the DOM as a
+  // placeholder, reserved for a future, different treatment.
+
+  // standard aspect-ratio presets for the top-left "format" handle
+  const PRESETS = [
+    {w:2.39,h:1,label:'2.39:1'},
+    {w:2.00,h:1,label:'2.00:1'},
+    {w:1.85,h:1,label:'1.85:1'},
+    {w:16,h:9,label:'16:9'},
+    {w:1,h:1,label:'1:1'},
+    {w:4,h:3,label:'4:3'},
+    {w:9,h:16,label:'9:16'},
+  ];
+  function nearestPreset(ratio){
+    let best = PRESETS[0], bestDiff = Infinity;
+    for(const p of PRESETS){
+      const d = Math.abs((p.w/p.h) - ratio);
+      if(d<bestDiff){ bestDiff=d; best=p; }
+    }
+    return best;
+  }
+
+  // elastic (rubber-band) format snapping state for the top-left handle
+  const elastic = { active:false, center:{x:0,y:0}, targetW:640, targetH:360, label:'' };
+
+  function resize(){
+    W = window.innerWidth; H = window.innerHeight;
+    CW = Math.round(W*2.4); CH = Math.round(H*2.4);
+    canvasOriginX = 0; canvasOriginY = 0;
+
+    world.style.left = ((W-CW)/2)+'px';
+    world.style.top = ((H-CH)/2)+'px';
+    world.style.width = CW+'px';
+    world.style.height = CH+'px';
+
+    // always recenter the drawing area on the canvas center, on every
+    // resize (not just the first run) — otherwise the frame stays at its
+    // old world coordinates while the canvas grows/shrinks, and visually
+    // drifts toward whichever side the window is being resized from
+    frame.x = CW/2 - frame.w/2;
+    frame.y = CH/2 - frame.h/2;
+
+    [ghost, front, notes].forEach(c=>{
+      c.width = CW*DPR; c.height = CH*DPR;
+      c.style.width = CW+'px'; c.style.height = CH+'px';
+      c.style.left = '0px'; c.style.top = '0px';
+      c.getContext('2d').setTransform(DPR,0,0,DPR,0,0);
+    });
+    positionFrame();
+    renderAll();
+  }
+
+  function frameRect(){
+    return { x:frame.x, y:frame.y, w:frame.w, h:frame.h, cx:frame.x+frame.w/2, cy:frame.y+frame.h/2 };
+  }
+
+  // Grows/relocates the canvas buffer only when the currently visible
+  // screen area is about to fall outside it — the buffer tracks the camera
+  // instead of trying to pre-cover every coordinate the user could ever
+  // reach. Returns true if it actually resized (caller must then redraw).
+  const COVERAGE_MARGIN = 400, COVERAGE_PAD = 600;
+  function ensureCanvasCoverage(){
+    const tl = toWorld(0,0), br = toWorld(W,H);
+    const minX = Math.min(tl.x,br.x), maxX = Math.max(tl.x,br.x);
+    const minY = Math.min(tl.y,br.y), maxY = Math.max(tl.y,br.y);
+    if(minX >= canvasOriginX+COVERAGE_MARGIN && maxX <= canvasOriginX+CW-COVERAGE_MARGIN &&
+       minY >= canvasOriginY+COVERAGE_MARGIN && maxY <= canvasOriginY+CH-COVERAGE_MARGIN){
+      return false;
+    }
+    canvasOriginX = minX - COVERAGE_PAD;
+    canvasOriginY = minY - COVERAGE_PAD;
+    CW = (maxX-minX) + COVERAGE_PAD*2;
+    CH = (maxY-minY) + COVERAGE_PAD*2;
+    [ghost, front, notes].forEach(c=>{
+      c.width = CW*DPR; c.height = CH*DPR;
+      c.style.width = CW+'px'; c.style.height = CH+'px';
+      c.style.left = canvasOriginX+'px'; c.style.top = canvasOriginY+'px';
+      c.getContext('2d').setTransform(DPR,0,0,DPR,0,0);
+    });
+    return true;
+  }
+
+  // front holds absolute-coordinate content that no longer automatically
+  // matches the window's bounds, so clip it visually to the window —
+  // otherwise shrinking the window would leave old content visible
+  // above the vignette instead of being hidden by it.
+  // overlap the clip by 1px past the true edge on every side: this keeps
+  // ink from stopping exactly on the frame's border pixel (which would
+  // otherwise sometimes peek through as a thin white seam where a stroke
+  // crosses the boundary at an angle)
+  function updateClipPath(){
+    const r = frameRect();
+    const bleed = 1;
+    front.style.clipPath = `inset(${r.y-canvasOriginY-bleed}px ${(canvasOriginX+CW)-(r.x+r.w)-bleed}px ${(canvasOriginY+CH)-(r.y+r.h)-bleed}px ${r.x-canvasOriginX-bleed}px round ${CORNER_R}px)`;
+  }
+
+  // --- camera focus: is the window near the viewport's center right now? ---
+  // Reuses frameBox's actual on-screen rect (already kept in sync by
+  // positionFrame/applyView) instead of re-deriving the transform math.
+  function isFocused(){
+    const r = frameBox.getBoundingClientRect();
+    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+    return Math.hypot(cx - W/2, cy - H/2) <= FOCUS_SNAP;
+  }
+  // true only once the window has fully left the viewport — distinct from
+  // isFocused(), which is about being centered, not merely visible
+  function isOutOfView(){
+    const r = frameBox.getBoundingClientRect();
+    return r.right<=0 || r.left>=W || r.bottom<=0 || r.top>=H;
+  }
+  function updateFocus(){
+    focused = isFocused();
+    penBtn.classList.toggle('locate', isOutOfView());
+    updateHoverAffordance();
+  }
+  function isPointOnFrameScreen(x,y){
+    const r = frameBox.getBoundingClientRect();
+    return x>=r.left && x<=r.right && y>=r.top && y<=r.bottom;
+  }
+  // Single source of truth for the "click to recenter" affordance, driven
+  // by the last known cursor position rather than only live pointermove —
+  // this way a trackpad pan/zoom (which moves the window under a
+  // stationary cursor) still updates the ring immediately, without
+  // waiting for the mouse to physically move again.
+  let lastCX = -9999, lastCY = -9999, lastTarget = null;
+  function updateHoverAffordance(){
+    if(drawing) return;
+    const overHandle = !!(lastTarget && lastTarget.closest && lastTarget.closest('.handleZone'));
+    // never show both affordances at once: a handle's own hover square
+    // already signals "you can interact here"
+    const hover = !cornerDragging && !overHandle && !focused && isPointOnFrameScreen(lastCX, lastCY);
+    ringVisible = hover;
+    syncFocusRing(hover);
+    stage.style.cursor = hover ? 'pointer' : '';
+  }
+  // positions the (unscaled) highlight ring exactly over the window's
+  // current on-screen rect, so its border reads as a constant thickness
+  // regardless of camera zoom
+  function syncFocusRing(show){
+    // keep geometry live even while fading out — the CSS opacity
+    // transition takes ~150ms, and the window can still be animating
+    // back to center during that time
+    const r = frameBox.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
+    focusRing.style.left = (r.left - sr.left)+'px';
+    focusRing.style.top = (r.top - sr.top)+'px';
+    focusRing.style.width = r.width+'px';
+    focusRing.style.height = r.height+'px';
+    // focusRing sits outside #world's scale, so its radius must be
+    // expressed in screen px to visually match the frame's world-space radius
+    focusRing.style.borderRadius = (CORNER_R*viewZoom)+'px';
+    focusRing.style.opacity = show ? '1' : '0';
+  }
+  // smoothly springs the camera back so the window is centered again
+  function recenterView(){
+    panFrom = { x:panX, y:panY };
+    panStart = performance.now();
+    panTarget = { x:0, y:0 };
+  }
+
+  const BLACK_OPTS = erase => ({color:'rgba(30,28,24,.88)', width: erase?16:2.2, erase});
+  const WHITE_OPTS = erase => ({color:'rgba(255,255,255,.5)', width: erase?16:1.6, erase});
+
+  function inFrameRect(pt, r){
+    return pt.x>=r.x && pt.x<=r.x+r.w && pt.y>=r.y && pt.y<=r.y+r.h;
+  }
+
+  // Classifies every stored segment against the CURRENT window rect and
+  // redraws both layers from scratch. This is what makes previously-hidden
+  // (white) ink turn black in real time as the window edge sweeps over it,
+  // and vice versa — the classification is purely a render-time concern.
+  function renderAll(){
+    fctx.clearRect(0,0,CW,CH);
+    nctx.clearRect(0,0,CW,CH);
+    const r = frameRect();
+    strokeSegments.forEach(seg=>{
+      const aIn = inFrameRect(seg.a, r), bIn = inFrameRect(seg.b, r);
+      if(aIn && bIn){
+        strokeSeg(fctx, seg.a, seg.b, BLACK_OPTS(seg.erase));
+      } else if(!aIn && !bIn){
+        strokeSeg(nctx, seg.a, seg.b, WHITE_OPTS(seg.erase));
+      } else {
+        const exit = aIn ? rectExit(seg.a, seg.b, r) : rectExit(seg.b, seg.a, r);
+        const inPt = aIn ? seg.a : seg.b, outPt = aIn ? seg.b : seg.a;
+        strokeSeg(fctx, inPt, exit, BLACK_OPTS(seg.erase));
+        strokeSeg(nctx, exit, outPt, WHITE_OPTS(seg.erase));
+      }
+    });
+  }
+  // permanently scales the WHOLE drawing (visible and currently-hidden
+  // parts alike) around a fixed center — this is the one operation that
+  // actually changes what's drawn (a real zoom), as opposed to just
+  // moving/resizing the window looking at it
+  function scaleInsideAround(center, factor){
+    strokeSegments.forEach(seg=>{
+      seg.a = { x: center.x+(seg.a.x-center.x)*factor, y: center.y+(seg.a.y-center.y)*factor };
+      seg.b = { x: center.x+(seg.b.x-center.x)*factor, y: center.y+(seg.b.y-center.y)*factor };
+    });
+  }
+
+  function positionFrame(){
+    const r = frameRect();
+    updateCornerRadius();
+    ensureCanvasCoverage();
+    updateClipPath();
+    frameBox.style.left = r.x+'px';
+    frameBox.style.top = r.y+'px';
+    frameBox.style.width = r.w+'px';
+    frameBox.style.height = r.h+'px';
+    ratioTag.style.left = (r.x - 4)+'px';
+    ratioTag.style.top = (r.y - 30)+'px';
+    updateFocus();
+    syncHandles();
+  }
+  // handles live outside #world (see markup), so their on-screen size
+  // stays fixed regardless of camera zoom — same trick as focusRing.
+  // Position is derived from frameBox's live screen rect each time.
+  function syncHandles(){
+    const r = frameBox.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
+    const corners = { tl:[r.left,r.top], tr:[r.right,r.top], bl:[r.left,r.bottom], br:[r.right,r.bottom] };
+    Object.keys(corners).forEach(c=>{
+      const el = document.querySelector('.handleZone.'+c);
+      el.style.left = (corners[c][0]-sr.left)+'px';
+      el.style.top = (corners[c][1]-sr.top)+'px';
+    });
+  }
+
+  function inFrame(x,y){
+    return inFrameRect({x,y}, frameRect());
+  }
+
+  function strokeSeg(ctx, a, b, opts){
+    ctx.save();
+    if(opts.erase){ ctx.globalCompositeOperation = 'destination-out'; }
+    ctx.strokeStyle = opts.color;
+    ctx.lineWidth = opts.width;
+    ctx.lineCap = 'round'; ctx.lineJoin='round';
+    ctx.shadowColor = opts.glow || 'transparent';
+    ctx.shadowBlur = opts.blur || 0;
+    ctx.beginPath();
+    ctx.moveTo(a.x-canvasOriginX,a.y-canvasOriginY); ctx.lineTo(b.x-canvasOriginX,b.y-canvasOriginY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // point where segment (inside -> outside) exits the rectangle, used to
+  // cut a crossing stroke exactly at the frame edge
+  function rectExit(insidePt, outsidePt, r){
+    const left=r.x, right=r.x+r.w, top=r.y, bottom=r.y+r.h;
+    const dx = outsidePt.x-insidePt.x, dy = outsidePt.y-insidePt.y;
+    let tmin=0, tmax=1;
+    if(dx!==0){
+      const tx1=(left-insidePt.x)/dx, tx2=(right-insidePt.x)/dx;
+      tmin=Math.max(tmin, Math.min(tx1,tx2)); tmax=Math.min(tmax, Math.max(tx1,tx2));
+    }
+    if(dy!==0){
+      const ty1=(top-insidePt.y)/dy, ty2=(bottom-insidePt.y)/dy;
+      tmin=Math.max(tmin, Math.min(ty1,ty2)); tmax=Math.min(tmax, Math.max(ty1,ty2));
+    }
+    return { x: insidePt.x + tmax*dx, y: insidePt.y + tmax*dy };
+  }
+
+  // The stroke stays whole in the data model — only the immediate visual
+  // feedback splits it at the current window edge, mirroring renderAll()'s
+  // per-frame classification instead of baking the split into the data.
+  function draw(x,y){
+    const p = {x,y};
+    if(last){
+      const erase = tool==='eraser';
+      strokeSegments.push({ a:last, b:p, erase });
+      const r = frameRect();
+      const aIn = inFrameRect(last, r), bIn = inFrameRect(p, r);
+      if(aIn && bIn){
+        strokeSeg(fctx, last, p, BLACK_OPTS(erase));
+      } else if(!aIn && !bIn){
+        strokeSeg(nctx, last, p, WHITE_OPTS(erase));
+      } else {
+        const exit = aIn ? rectExit(last, p, r) : rectExit(p, last, r);
+        const inPt = aIn ? last : p, outPt = aIn ? p : last;
+        strokeSeg(fctx, inPt, exit, BLACK_OPTS(erase));
+        strokeSeg(nctx, exit, outPt, WHITE_OPTS(erase));
+      }
+    }
+    last = p;
+  }
+
+  function toWorld(clientX, clientY){
+    const r = world.getBoundingClientRect();
+    return { x: (clientX - r.left)/viewZoom, y: (clientY - r.top)/viewZoom };
+  }
+
+  stage.addEventListener('pointerdown', e=>{
+    if(e.target.closest('#toolbar') || e.target.closest('#zoom') || e.target.closest('.handleZone')) return;
+    if(!focused && isPointOnFrameScreen(e.clientX, e.clientY)){
+      recenterView();
+      return; // this click brings the window back; it doesn't draw
+    }
+    drawing = true; last = null;
+    const p = toWorld(e.clientX, e.clientY);
+    draw(p.x, p.y);
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointermove', e=>{
+    lastCX = e.clientX; lastCY = e.clientY; lastTarget = e.target;
+    if(!drawing){
+      updateHoverAffordance();
+      return;
+    }
+    const p = toWorld(e.clientX, e.clientY);
+    draw(p.x, p.y);
+  });
+  window.addEventListener('pointerup', ()=>{ drawing=false; last=null; });
+
+  document.querySelectorAll('#toolbar button[data-tool]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      tool = b.dataset.tool;
+      document.querySelectorAll('#toolbar button[data-tool]').forEach(x=>x.classList.toggle('active', x===b));
+      // the pencil doubles as a "find the window" control: clicking it
+      // always recenters the view, whether it was already active or not
+      if(b===penBtn) recenterView();
+    });
+  });
+  document.getElementById('clearBtn').addEventListener('click', ()=>{
+    strokeSegments = [];
+    fctx.clearRect(0,0,CW,CH);
+    nctx.clearRect(0,0,CW,CH);
+  });
+
+  function applyView(){
+    zLabel.textContent = Math.round(viewZoom*100)+'%';
+    // translate is listed first so it moves the already-scaled element by
+    // raw screen pixels — panning feels the same regardless of zoom level
+    world.style.transform = `translate(${panX}px, ${panY}px) scale(${viewZoom})`;
+    // panning/zooming is normally a free CSS transform (GPU-cheap, no
+    // redraw) — only touch the canvas buffer when the visible area is
+    // about to outgrow it
+    if(ensureCanvasCoverage()){ updateClipPath(); renderAll(); }
+    updateFocus();
+    syncHandles();
+  }
+  document.getElementById('zIn').addEventListener('click', ()=>{ viewZoom = Math.min(viewZoom*1.15, 4); applyView(); });
+  document.getElementById('zOut').addEventListener('click', ()=>{ viewZoom = Math.max(viewZoom/1.15, 0.25); applyView(); });
+  stage.addEventListener('wheel', e=>{
+    e.preventDefault();
+    if(e.ctrlKey){
+      // trackpad pinch gesture is reported as a wheel event with ctrlKey set
+      viewZoom = Math.max(0.25, Math.min(4, viewZoom * (e.deltaY<0?1.08:0.92)));
+    } else {
+      // two-finger trackpad pan / mouse-wheel scroll
+      panTarget = null; // a manual pan cancels any in-flight recenter animation
+      panX -= e.deltaX;
+      panY -= e.deltaY;
+    }
+    applyView();
+  }, {passive:false});
+
+  // top-right / bottom-left corners: real ZOOM — the window grows and its
+  // content grows with it (uniform, aspect-preserving), anchored at center
+  const ZOOM_CORNERS = { tr:{x:1,y:-1}, bl:{x:-1,y:1} };
+  Object.keys(ZOOM_CORNERS).forEach(corner=>{
+    const zone = document.querySelector('.handleZone.'+corner);
+    const sign = ZOOM_CORNERS[corner];
+    zone.addEventListener('pointerdown', e=>{
+      e.stopPropagation();
+      cornerDragging = true;
+      updateHoverAffordance();
+      const startX=e.clientX, startY=e.clientY;
+      const startW=frame.w, startH=frame.h;
+      const aspect = startW/startH;
+      const center = { x: frame.x+frame.w/2, y: frame.y+frame.h/2 };
+      let prevW = startW;
+      const move=(ev)=>{
+        const dx=(ev.clientX-startX)/viewZoom, dy=(ev.clientY-startY)/viewZoom;
+        const delta = (dx*sign.x + dy*sign.y)/2;
+        const newW = Math.max(120, startW + delta*2);
+        const factor = newW/prevW;
+        if(factor !== 1) scaleInsideAround(center, factor);
+        prevW = newW;
+        frame.w = newW;
+        frame.h = newW/aspect;
+        frame.x = center.x - frame.w/2;
+        frame.y = center.y - frame.h/2;
+        positionFrame();
+        renderAll();
+      };
+      const up=(ev)=>{
+        cornerDragging=false;
+        lastCX=ev.clientX; lastCY=ev.clientY;
+        updateHoverAffordance();
+        window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
+      };
+      window.addEventListener('pointermove',move);
+      window.addEventListener('pointerup',up);
+      zone.setPointerCapture(e.pointerId);
+    });
+  });
+
+  // bottom-right corner: WINDOW-ONLY resize — grows/shrinks the viewport
+  // rectangle at a fixed content scale, so it just reveals more or less of
+  // the same underlying drawing instead of magnifying/shrinking it
+  const WINDOW_CORNERS = { br:{x:1,y:1} };
+  Object.keys(WINDOW_CORNERS).forEach(corner=>{
+    const zone = document.querySelector('.handleZone.'+corner);
+    const sign = WINDOW_CORNERS[corner];
+    zone.addEventListener('pointerdown', e=>{
+      e.stopPropagation();
+      cornerDragging = true;
+      updateHoverAffordance();
+      const startX=e.clientX, startY=e.clientY;
+      const startW=frame.w, startH=frame.h;
+      const aspect = startW/startH;
+      const center = { x: frame.x+frame.w/2, y: frame.y+frame.h/2 };
+      const move=(ev)=>{
+        const dx=(ev.clientX-startX)/viewZoom, dy=(ev.clientY-startY)/viewZoom;
+        const delta = (dx*sign.x + dy*sign.y)/2;
+        const newW = Math.max(120, startW + delta*2);
+        frame.w = newW;
+        frame.h = newW/aspect;
+        frame.x = center.x - frame.w/2;
+        frame.y = center.y - frame.h/2;
+        positionFrame();
+        renderAll();
+      };
+      const up=(ev)=>{
+        cornerDragging=false;
+        lastCX=ev.clientX; lastCY=ev.clientY;
+        updateHoverAffordance();
+        window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
+      };
+      window.addEventListener('pointermove',move);
+      window.addEventListener('pointerup',up);
+      zone.setPointerCapture(e.pointerId);
+    });
+  });
+
+  // top-left corner: changes the FORMAT (aspect ratio) to the nearest standard preset,
+  // anchored at the fixed bottom-right corner, with a rubbery/elastic catch-up animation
+  const tlZone = document.querySelector('.handleZone.tl');
+  tlZone.addEventListener('pointerdown', e=>{
+    e.stopPropagation();
+    cornerDragging = true;
+    updateHoverAffordance();
+    // anchor on the frame's own center, so the format change is symmetric
+    // in both directions instead of pinned to the opposite corner
+    const center = { x: frame.x+frame.w/2, y: frame.y+frame.h/2 };
+    elastic.center = center;
+    elastic.active = true;
+    ratioTag.style.opacity = '1';
+    // fix the area at the size the frame had when the gesture started —
+    // this way scale is determined only by which preset is picked, not
+    // by how far the cursor is dragged; continuing to drag within the
+    // same preset no longer keeps inflating the size
+    const area = frame.w * frame.h;
+    const move=(ev)=>{
+      const p = toWorld(ev.clientX, ev.clientY);
+      // distance from center, mirrored to both sides -> used only to
+      // detect direction/ratio, not to set absolute size
+      let rawW = (center.x - p.x)*2, rawH = (center.y - p.y)*2;
+      rawW = Math.max(1, rawW); rawH = Math.max(1, rawH);
+      const preset = nearestPreset(rawW/rawH);
+      const ratio = preset.w/preset.h;
+      // derive w/h from the fixed area + chosen preset's ratio
+      let targetW = Math.sqrt(area*ratio);
+      let targetH = targetW/ratio;
+      targetW = Math.max(90, targetW);
+      targetH = Math.max(60, targetH);
+      elastic.targetW = targetW; elastic.targetH = targetH; elastic.label = preset.label;
+      ratioTag.textContent = preset.label;
+    };
+    const up=(ev)=>{
+      cornerDragging = false;
+      lastCX=ev.clientX; lastCY=ev.clientY;
+      updateHoverAffordance();
+      window.removeEventListener('pointermove',move);
+      window.removeEventListener('pointerup',up);
+      setTimeout(()=>{ if(!elastic.settling){} }, 0);
+      // fade the label out once it's basically settled
+      const check = setInterval(()=>{
+        if(Math.abs(frame.w-elastic.targetW)<0.5 && Math.abs(frame.h-elastic.targetH)<0.5){
+          ratioTag.style.opacity='0'; elastic.active=false; clearInterval(check);
+        }
+      }, 120);
+    };
+    window.addEventListener('pointermove',move);
+    window.addEventListener('pointerup',up);
+    tlZone.setPointerCapture(e.pointerId);
+  });
+
+  // continuous rubber-band easing loop — shared by the format handle and
+  // by "click to recenter" (reusing one animation loop instead of two)
+  function elasticTick(){
+    if(elastic.active){
+      frame.w += (elastic.targetW - frame.w)*0.16;
+      frame.h += (elastic.targetH - frame.h)*0.16;
+      frame.x = elastic.center.x - frame.w/2;
+      frame.y = elastic.center.y - frame.h/2;
+      positionFrame();
+      renderAll();
+    }
+    if(panTarget){
+      // time-based ease-out over a fixed duration: deceleration is spread
+      // across the whole move and stays visible, instead of a lerp where
+      // most of the distance vanishes in the first frame
+      const t = Math.min(1, (performance.now()-panStart)/PAN_DURATION);
+      const e = easeDock(t);
+      panX = panFrom.x + (panTarget.x-panFrom.x)*e;
+      panY = panFrom.y + (panTarget.y-panFrom.y)*e;
+      if(t>=1) panTarget = null;
+      applyView();
+    }
+    requestAnimationFrame(elasticTick);
+  }
+  elasticTick();
+
+  window.addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>
