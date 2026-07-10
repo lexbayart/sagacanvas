@@ -1,5 +1,7 @@
 # SagaCanvas 🔷 Beta
 
+![SagaCanvas Interface](images/screenshot.png)
+
 > A free-form storyboarding canvas that doesn't tell you where to draw.
 
 ---
