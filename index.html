@@ -7,9 +7,7 @@
   html,body{margin:0;height:100%;background:#050505;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
   #stage{position:relative;width:100vw;height:100vh;background:radial-gradient(ellipse at 50% 42%, #32353a 0%, #24262a 32%, #16181c 62%, #0d0f11 100%);overflow:hidden;touch-action:none;}
   #world{position:absolute;transform-origin:50% 50%;}
-  #ghost{position:absolute;left:0;top:0;}
-  #front{position:absolute;left:0;top:0;}
-  #notes{position:absolute;left:0;top:0;}
+  #ghost,#front,#frontBelow,#frontAbove,#notes,#notesBelow,#notesAbove{position:absolute;left:0;top:0;}
   .frame{box-sizing:border-box;position:absolute;border:1px solid rgba(255,255,255,.65);box-shadow:0 8px 60px 12px rgba(0,0,0,.5);background:#f4f2ee;border-radius:var(--corner-r);}
   /* lives OUTSIDE #world (not scaled with it) so its thickness stays
      constant in screen pixels no matter how far the camera has zoomed.
@@ -24,23 +22,100 @@
   .handle{width:11px;height:11px;border-radius:3px;background:rgba(255,255,255,.9);border:1px solid rgba(0,0,0,.35);opacity:0;transition:opacity .12s ease;}
   .handleZone:hover .handle{opacity:1;}
   .ratioTag{position:absolute;color:rgba(255,255,255,.7);font-size:11px;background:rgba(0,0,0,.55);padding:3px 7px;border-radius:5px;opacity:0;transition:opacity .12s ease;pointer-events:none;}
-  #toolbar{position:absolute;top:22px;left:50%;transform:translateX(-50%);display:flex;gap:6px;padding:8px;border-radius:14px;background:rgba(255,255,255,.05);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.08);}
+  /* left edge, sitting a bit above dead-center: top edge = 50% minus the
+     bar's own full rendered height (276px = 6 buttons*38 + 5 gaps*6 +
+     padding 8*2 + border 1*2*2), which works out to the bar's CENTER
+     landing half its own height above viewport-center — same 22px edge
+     offset as the left side. If button count/sizing changes, 276 needs
+     updating to match. max() keeps it from crossing the same 22px floor
+     on short viewports, same idea as effectiveBias() below but for the
+     toolbar's own position rather than the camera's.
+     LEFT_CLEARANCE in the JS below is sized to this rect's width; move
+     this and update that. */
+  #toolbar{position:absolute;left:22px;top:max(22px, calc(50% - 276px));display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:14px;background:rgba(255,255,255,.05);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.08);}
   #toolbar button{width:38px;height:38px;border-radius:9px;border:none;background:transparent;color:rgba(255,255,255,.55);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:box-shadow .15s ease;}
+  #toolbar button svg{display:block;} /* inline svg default is inline-block and leaves a few px of phantom baseline gap otherwise */
   #toolbar button.active{background:rgba(255,255,255,.14);color:#fff;}
+  #toolbar button:disabled{color:rgba(255,255,255,.18);cursor:default;}
   #toolbar button.locate{box-shadow:inset 0 0 0 2px rgba(150,255,175,.95), 0 0 10px 1px rgba(150,255,175,.45);}
+  /* same idea as .locate above (pen: "the window is out of view, click to
+     go find it"), but red and on moveBtn itself instead of the frame —
+     "no, can't move it from here" rather than an invitation to click
+     anything. Lives directly on the always-on-screen button rather than
+     trying to highlight the window's own (possibly off-screen) position,
+     which needs no clamping or positioning math at all. */
+  #moveBtn.blocked{box-shadow:inset 0 0 0 2px rgba(255,90,90,.95), 0 0 10px 1px rgba(255,90,90,.45);}
+  /* moveBtn is a press-and-hold joystick, not a select-then-use-elsewhere
+     tool like pen/eraser (see its JS wiring) — cursor hints at "grab"
+     before the gesture starts. Once actually dragging, the cursor is
+     hidden globally (html.moving-ink below): the gesture reads mouse
+     MOVEMENT, not the cursor's absolute position, so there's nothing on
+     screen for a visible cursor to meaningfully track anyway, and a
+     cursor drifting away from the button while the drawing shifts under
+     an unrelated point would just be confusing. */
+  #moveBtn{cursor:grab;touch-action:none;}
+  #moveBtn:active{cursor:grabbing;}
+  html.moving-ink, html.moving-ink *{cursor:none!important;}
   #zoom{position:absolute;bottom:24px;right:24px;display:flex;gap:8px;align-items:center;color:rgba(255,255,255,.4);font-size:12px;}
   #zoom button{width:28px;height:28px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:rgba(255,255,255,.6);cursor:pointer;}
+  /* storyboard filmstrip: lives OUTSIDE #world (like focusRing/handles) so
+     it tracks the drawing window's own on-screen rect frame-by-frame —
+     magnetized directly under the active canvas, not a separate app-level
+     bar. Revealed only once the cursor drops below the window. */
+  #filmstrip{position:absolute;left:0;top:0;display:flex;justify-content:center;opacity:0;transform:translateY(-10px);pointer-events:none;transition:opacity .15s ease, transform .15s ease;z-index:5;}
+  #filmstrip.visible{opacity:1;transform:translateY(0);pointer-events:auto;}
+  /* fade-to-transparent at both ends instead of a hard clip — so a tile
+     that's only partially scrolled into view dissolves at the edge rather
+     than being sliced off flat. Width of the fade is set from JS (px, so
+     it stays constant regardless of tile size) via --fade var. Scrollbar
+     itself is hidden since the fade already communicates "more this way". */
+  #filmTrack{display:flex;gap:8px;max-width:100%;overflow-x:auto;background:transparent;
+    -webkit-mask-image:linear-gradient(to right, transparent 0, #000 var(--fade,0px), #000 calc(100% - var(--fade,0px)), transparent 100%);
+    mask-image:linear-gradient(to right, transparent 0, #000 var(--fade,0px), #000 calc(100% - var(--fade,0px)), transparent 100%);
+    scrollbar-width:none;}
+  #filmTrack::-webkit-scrollbar{display:none;}
+  .filmThumb{box-sizing:border-box;border-radius:6px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);border:2px solid transparent;display:block;flex:none;}
+  .filmThumb.active{border-color:rgba(150,255,175,.9);}
+  .filmThumb:hover{border-color:rgba(255,255,255,.4);}
+  .filmThumb.active:hover{border-color:rgba(150,255,175,.9);}
+  .filmAdd{box-sizing:border-box;flex:none;display:flex;align-items:center;justify-content:center;border-radius:6px;border:1px dashed rgba(255,255,255,.3);color:rgba(255,255,255,.5);cursor:pointer;font-size:20px;transition:color .12s ease, border-color .12s ease;}
+  .filmAdd:hover{color:rgba(255,255,255,.9);border-color:rgba(255,255,255,.55);}
+  /* layer rail: same appear-on-hover / scroll-with-fade mechanic as the
+     filmstrip above, rotated 90° — a vertical column of circles to the
+     RIGHT of the frame instead of a horizontal row of aspect-matched
+     tiles below it. Circles are a fixed round shape regardless of the
+     scene's own frame aspect (unlike filmThumb, which reshapes per
+     scene) — see renderLayerRail()'s comment for how content is cropped
+     to fit that fixed shape. */
+  #layerRail{position:absolute;left:0;top:0;display:flex;flex-direction:column;justify-content:center;opacity:0;transform:translateX(10px);pointer-events:none;transition:opacity .15s ease, transform .15s ease;z-index:5;}
+  #layerRail.visible{opacity:1;transform:translateX(0);pointer-events:auto;}
+  #layerTrack{display:flex;flex-direction:column;gap:8px;max-height:100%;overflow-y:auto;background:transparent;
+    -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 var(--fade,0px), #000 calc(100% - var(--fade,0px)), transparent 100%);
+    mask-image:linear-gradient(to bottom, transparent 0, #000 var(--fade,0px), #000 calc(100% - var(--fade,0px)), transparent 100%);
+    scrollbar-width:none;}
+  #layerTrack::-webkit-scrollbar{display:none;}
+  .layerThumb{box-sizing:border-box;border-radius:50%;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);border:2px solid transparent;display:block;flex:none;}
+  .layerThumb.active{border-color:rgba(150,255,175,.9);}
+  .layerThumb:hover{border-color:rgba(255,255,255,.4);}
+  .layerThumb.active:hover{border-color:rgba(150,255,175,.9);}
+  .layerAdd{box-sizing:border-box;flex:none;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px dashed rgba(255,255,255,.3);color:rgba(255,255,255,.5);cursor:pointer;font-size:18px;transition:color .12s ease, border-color .12s ease;}
+  .layerAdd:hover{color:rgba(255,255,255,.9);border-color:rgba(255,255,255,.55);}
 </style>
 </head>
 <body>
 <div id="stage">
   <div id="world">
     <canvas id="ghost"></canvas>
+    <canvas id="notesBelow"></canvas>
     <canvas id="notes"></canvas>
+    <canvas id="notesAbove"></canvas>
     <div class="frame" id="frameBox"></div>
+    <canvas id="frontBelow"></canvas>
     <canvas id="front"></canvas>
-    <div class="ratioTag" id="ratioTag"></div>
+    <canvas id="frontAbove"></canvas>
   </div>
+  <div id="layerRail"><div id="layerTrack"></div></div>
+  <div class="ratioTag" id="ratioTag"></div>
   <div id="focusRing"></div>
   <div class="handleZone tl" data-corner="tl"><div class="handle"></div></div>
   <div class="handleZone tr" data-corner="tr"><div class="handle"></div></div>
@@ -50,6 +125,28 @@
   <div id="toolbar">
     <button data-tool="pen" class="active" title="Перо">✏</button>
     <button data-tool="eraser" title="Ластик">⌫</button>
+    <button id="moveBtn" title="Сдвинуть рисунок — зажать и тянуть в любую сторону">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="3" x2="12" y2="21"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <polyline points="9,6 12,3 15,6"/>
+        <polyline points="9,18 12,21 15,18"/>
+        <polyline points="6,9 3,12 6,15"/>
+        <polyline points="18,9 21,12 18,15"/>
+      </svg>
+    </button>
+    <button id="undoBtn" title="Отменить действие">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 7 4 12l5 5"/>
+        <path d="M4 12h11a5 5 0 0 1 0 10h-1"/>
+      </svg>
+    </button>
+    <button id="redoBtn" title="Повторить действие">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M15 7 20 12l-5 5"/>
+        <path d="M20 12H9a5 5 0 0 0 0 10h1"/>
+      </svg>
+    </button>
     <button id="clearBtn" title="Очистить">✕</button>
   </div>
 
@@ -58,6 +155,8 @@
     <span id="zLabel">100%</span>
     <button id="zIn">+</button>
   </div>
+
+  <div id="filmstrip"><div id="filmTrack"></div></div>
 </div>
 
 <script>
@@ -67,8 +166,43 @@
   const ghost = document.getElementById('ghost');
   const front = document.getElementById('front');
   const fctx = front.getContext('2d');
+  // Every layer in the active scene EXCEPT the one currently active for
+  // drawing gets flattened into one of two composites, split by real
+  // stacking order (layers[0] = bottom of the stack, layers[length-1] =
+  // top — see addLayerAbove/addLayerBelow): frontBelow/notesBelow holds
+  // everything with a LOWER index than the active layer, painted UNDER
+  // front/notes; frontAbove/notesAbove holds everything with a HIGHER
+  // index, painted OVER front/notes. That's what lets the active layer
+  // sit at its real position in the stack instead of always appearing on
+  // top — draw on a layer you added "below" an existing one, and a layer
+  // above it correctly occludes your strokes there, matching what
+  // layers are supposed to do.
+  // This is also what makes erasing layer-safe: front/notes are
+  // repainted straight from the active layer's own segments (exactly as
+  // before layers existed), so an eraser stroke there only ever touches
+  // pixels that came from THIS layer. frontBelow/Above are rebuilt by
+  // renderStaticLayers() only when the active layer or scene changes
+  // (see there), never on every stroke, and never share a bitmap with
+  // front/notes or with each other.
+  const frontBelow = document.getElementById('frontBelow');
+  const fctxBelow = frontBelow.getContext('2d');
+  const frontAbove = document.getElementById('frontAbove');
+  const fctxAbove = frontAbove.getContext('2d');
   const notes = document.getElementById('notes');
   const nctx = notes.getContext('2d');
+  const notesBelow = document.getElementById('notesBelow');
+  const nctxBelow = notesBelow.getContext('2d');
+  const notesAbove = document.getElementById('notesAbove');
+  const nctxAbove = notesAbove.getContext('2d');
+  // reused scratch pair for isolating ONE non-active layer's own ink
+  // before it's flattened onto frontBelow/Above or notesBelow/Above —
+  // never attached to the DOM, exists purely as an off-screen buffer.
+  // Cleared and reused for each layer in turn rather than allocated
+  // per-layer, since renderStaticLayers() only ever needs one at a time.
+  const groupScratchF = document.createElement('canvas');
+  const gsfCtx = groupScratchF.getContext('2d');
+  const groupScratchN = document.createElement('canvas');
+  const gsnCtx = groupScratchN.getContext('2d');
   const frameBox = document.getElementById('frameBox');
   const focusRing = document.getElementById('focusRing');
   const zLabel = document.getElementById('zLabel');
@@ -76,7 +210,28 @@
   const penBtn = document.querySelector('#toolbar button[data-tool="pen"]');
 
   let DPR = Math.min(window.devicePixelRatio || 1, 2);
+  // shifts the whole "centered" position up by this many screen px (a
+  // raw, zoom-independent offset — same units panX/panY already use),
+  // trading some of the empty margin above the canvas for more breathing
+  // room below it, where the filmstrip lives. Every place that means
+  // "centered" — the default camera position, recenterView()'s target,
+  // isFocused()'s reference point, and the safe-area budget below —
+  // needs to agree on this same number.
+  const VERTICAL_BIAS = 60;
+  // shrinks toward 0 on very short viewports instead of insisting on the
+  // full bias — otherwise, on a short enough window, shifting up by a
+  // fixed 60px could itself push the box past the top clearance margin,
+  // which defeats the point (the bias is supposed to make room, not eat
+  // into the one margin that must never be crossed).
+  function effectiveBias(){
+    if(!H) return VERTICAL_BIAS;
+    return Math.max(0, Math.min(VERTICAL_BIAS, H/2 - TOP_CLEARANCE - 20));
+  }
   let W, H, CW, CH;
+  // #world's own box size (its CSS width/height, and therefore where its
+  // transform-origin/center sits in logical coordinates) is set ONCE and
+  // never changed again — see the note inside resize() for why.
+  let WORLD_W, WORLD_H;
   // the canvas bitmaps (ghost/front/notes) are a finite window onto an
   // otherwise-unbounded logical coordinate space — canvasOriginX/Y is the
   // logical point that maps to the buffer's pixel (0,0). frame.x/y and every
@@ -107,10 +262,82 @@
   // just because the cursor happens to pass over the window mid-drag
   let cornerDragging = false;
   let last = null;
+  // The window's ON-SCREEN footprint is auto-normalized so any shot,
+  // whatever its own logical size/aspect, always displays at the same
+  // comfortable size — switching shots, or resizing one, never makes the
+  // window itself jump bigger/smaller on screen. `zoomMultiplier` is the
+  // user's own deliberate zoom-in/out on top of that automatic baseline
+  // (wheel / +- buttons); `viewZoom` is the actual, effective CSS scale
+  // applied, recomputed by updateZoom() whenever the frame's size or the
+  // multiplier changes.
+  const FIT_REF = 640; // on-screen px for whichever side is longer, at multiplier 1 — matches the original default 640x360 frame's size at 100%
+  // space always reserved around the frame box, so switching to a tall
+  // (portrait/square) format can never push the frame under the toolbar
+  // on the left or the filmstrip tray off the bottom — a plain "longer
+  // side = FIT_REF" rule has no idea those exist, and will happily size
+  // a 9:16 shot as if the whole viewport were free for drawing. These
+  // five are independent — fitZoomFor() below checks each opposing pair
+  // separately rather than folding them into one number, because neither
+  // axis is symmetric: vertically the canvas sits above dead-center (see
+  // VERTICAL_BIAS) so top/bottom differ, and horizontally the left side
+  // has the toolbar to clear while the right side has the layer rail, so
+  // left/right differ too (by different amounts, since the two panels
+  // aren't the same width). Changing any one on its own is safe.
+  const TOP_CLEARANCE = 30, BOTTOM_CLEARANCE = 30, LEFT_CLEARANCE = 100, RIGHT_CLEARANCE = 110, TRAY_GAP = 10, RAIL_GAP = 10;
+  // shared with renderFilmstrip() below: no single tile (any scene's own
+  // thumbnail, or the active shot's own future one) is ever allowed to be
+  // taller than this, however extreme its aspect ratio — a portrait tile
+  // shrinks its WIDTH instead once it hits this, rather than growing
+  // downward off-screen.
+  const MAX_TILE_H = 120;
+  // circles in the layer rail (renderLayerRail() below) are a FIXED
+  // diameter rather than reshaped per frame height like filmstrip tiles
+  // are — see LAYER_D's own definition inside renderLayerRail() for where
+  // that number comes from and why. LAYER_D_MIN below is the floor for
+  // the one case a fixed size can't handle on its own (a frame too short
+  // to fit the normal count at full size) — see the shrink branch there.
+  const LAYER_D_MIN = 32;
+  function fitZoomFor(w, h){
+    const base = FIT_REF / Math.max(w, h);
+    // W/H aren't set until resize() runs (right at the very end of
+    // startup) — updateZoom() is called once before that, so fall back
+    // to the plain baseline until real viewport dimensions exist rather
+    // than compute against undefined and end up with NaN.
+    if(!W || !H) return base;
+    // reserve the FULL worst-case tray height (MAX_TILE_H), not just
+    // whatever this particular shot's own thumbnail would need — another
+    // scene elsewhere in the storyboard can have a completely different
+    // (and, up to that same cap, much taller) aspect ratio, and its tile
+    // sits in the very same row, regardless of what shape is active now.
+    //
+    // Two SEPARATE constraints, not one combined number: the box is
+    // vertically centered around (H/2 - VERTICAL_BIAS), so the space
+    // above it and below it shrink/grow independently as the box grows,
+    // and each side has its own thing to clear (plain margin above, tray
+    // below). Adding both clearance numbers into one budget only
+    // happened to work by coincidence when there was no bias (the two
+    // sides were symmetric); with a bias they're genuinely different
+    // constraints and must be checked separately.
+    const bias = effectiveBias();
+    const safeH_top = (H - 2*TOP_CLEARANCE - 2*bias) / h;
+    const safeH_bottom = (H + 2*bias - 2*(TRAY_GAP + MAX_TILE_H + BOTTOM_CLEARANCE)) / h;
+    const safeH = Math.min(safeH_top, safeH_bottom);
+    // same idea horizontally: the frame is NOT horizontally biased (panX
+    // defaults to 0, dead-center), but the two sides still aren't
+    // symmetric, since only the left one has the toolbar to clear — so
+    // this is a sum of two different numbers, not one doubled.
+    const safeW = (W - LEFT_CLEARANCE - RIGHT_CLEARANCE) / w;
+    return Math.max(0.05, Math.min(base, safeH, safeW));
+  }
+  let zoomMultiplier = 1;
   let viewZoom = 1;
+  function updateZoom(){
+    viewZoom = fitZoomFor(frame.w, frame.h) * zoomMultiplier;
+  }
+  updateZoom();
   // camera pan (screen px, applied outside the zoom scale so wheel-pan
   // distance feels the same regardless of current zoom level)
-  let panX = 0, panY = 0;
+  let panX = 0, panY = -VERTICAL_BIAS;
   // eased pan destination while animating back to center; null = not animating
   let panTarget = null;
   let panFrom = null, panStart = 0;
@@ -134,10 +361,199 @@
   // stored once, in absolute world coordinates, regardless of whether it's
   // currently inside or outside the window — "inside vs outside" is not a
   // property of the data, it's recomputed at render time from `frame`.
-  let strokeSegments = [];
+  // Storyboard support: each "scene" owns its own drawing window (frame
+  // position/size/format) plus camera (zoom/pan) — switching scenes
+  // restores that shot's own framing, so resizing/reformatting/zooming
+  // one panel can never bleed into any other.
+  //
+  // Layer support: a scene's ink isn't one segment list anymore but a
+  // stack of LAYERS (scenes[i].layers[]), each with its own segments —
+  // all the same size/format as the scene's single shared `frame` (the
+  // brief: layers don't get their own window, only the scene does).
+  // scenes[i].activeLayer is which one currently receives drawing.
+  // Undo/redo history is per-LAYER, for the same reason it's per-scene:
+  // an action taken on one layer's ink should never be undoable from a
+  // different layer. Each history entry is one whole stroke
+  // (pointerdown..pointerup) or one whole clear, never a single segment
+  // — see commitStroke/pushClearHistory below.
+  let scenes = [{
+    frame: frame, zoomMultiplier: zoomMultiplier, panX: panX, panY: panY,
+    layers: [{ segments: [], history: [], future: [], inkVersion: 0 }],
+    activeLayer: 0, inkVersion: 0
+  }];
+  let activeScene = 0;
+  let strokeSegments = scenes[activeScene].layers[0].segments;
+  let history = scenes[activeScene].layers[0].history;
+  let future = scenes[activeScene].layers[0].future;
+
+  // Writes the live camera/window state back into whichever scene
+  // currently owns it. `frame` is always a direct reference to the active
+  // scene's own frame object (see loadView), so its x/y/w/h are already
+  // live in place — only the primitive multiplier/pan numbers need
+  // copying back before `frame` gets pointed at a different scene.
+  function saveView(){
+    const sc = scenes[activeScene];
+    sc.zoomMultiplier = zoomMultiplier; sc.panX = panX; sc.panY = panY;
+  }
+  // Points the live frame/zoomMultiplier/panX/panY vars at the now-active
+  // scene's own stored state, recomputes the effective viewZoom for its
+  // (possibly different-shaped) window, and cancels any in-flight
+  // pan/format animation, since that belonged to the scene being left.
+  // Layer data is a separate step — see loadLayer() — since scene and
+  // layer identity change independently of one another (switchLayer()
+  // needs the layer half without touching the camera at all).
+  function loadView(){
+    const sc = scenes[activeScene];
+    frame = sc.frame;
+    zoomMultiplier = sc.zoomMultiplier; panX = sc.panX; panY = sc.panY;
+    updateZoom();
+    panTarget = null;
+    elastic.active = false;
+    ratioTag.style.opacity = '0';
+  }
+  // Points strokeSegments/history/future at whichever layer is now active
+  // in the active scene. Called after loadView() on a scene switch, and
+  // alone on a plain layer switch (camera/frame never change for that).
+  function loadLayer(){
+    const layer = scenes[activeScene].layers[scenes[activeScene].activeLayer];
+    strokeSegments = layer.segments;
+    history = layer.history; future = layer.future;
+    updateHistoryButtons();
+  }
+  // Starting state for a brand-new scene: the SAME window SHAPE (aspect
+  // ratio/format) as whatever's currently active, so a new panel matches
+  // your storyboard's established framing — but always at the baseline
+  // SIZE for that shape (longer side = FIT_REF), always default zoom, and
+  // always centered with no pan offset. Cloning the current pan would
+  // carry forward wherever the camera happened to be sitting on the
+  // previous scene — if that scene had been panned away from center, the
+  // new one would open off-center too (unfocused, first click just
+  // recenters instead of drawing) even though nothing about the new
+  // scene itself was ever moved. Always starts with exactly one empty
+  // layer, active — same "nothing drawn yet" starting point layers had
+  // before this scene existed.
+  function newSceneData(){
+    const s = FIT_REF / Math.max(frame.w, frame.h);
+    const w = frame.w*s, h = frame.h*s;
+    // NOT CW/CH: those describe #world's box size only right after
+    // resize() runs. Panning/zooming can make ensureCanvasCoverage()
+    // repurpose the same two variables to describe the canvas bitmap's
+    // coverage window instead (a different size, off a different origin)
+    // — reading them here would silently miscenter the new scene as soon
+    // as that's happened. #world's own style is never touched by
+    // coverage, so it's the one reliable source for its true box size.
+    const worldW = parseFloat(world.style.width), worldH = parseFloat(world.style.height);
+    return {
+      frame: { x: worldW/2-w/2, y: worldH/2-h/2, w, h },
+      zoomMultiplier: 1, panX: 0, panY: -effectiveBias(),
+      layers: [{ segments: [], history: [], future: [], inkVersion: 0 }],
+      activeLayer: 0, inkVersion: 0
+    };
+  }
+  // Guards every scene/layer switch below against firing mid-gesture.
+  // Drawing and move-ink both write into shared state (strokeSegments /
+  // strokeBuffer / `last`, or `strokeSegments` again for the move) that's
+  // implicitly tied to whichever layer was active when the gesture
+  // STARTED. A single mouse/pen can never trigger this — you can't hold
+  // a button down for one gesture and also click a rail/filmstrip circle
+  // — but a second simultaneous touch point can, on a touchscreen. If a
+  // switch reassigned strokeSegments/history mid-stroke, the tail end of
+  // that one stroke would silently land in a DIFFERENT layer's data than
+  // its head, and commitStroke() would then attribute the whole mixed
+  // bag to whichever layer happens to be active at pointerup — corrupt
+  // undo history. Simplest safe answer: the switch just doesn't happen
+  // yet. The click is silently ignored rather than queued — trying again
+  // after the gesture ends is indistinguishable from any other double
+  // click, so there's nothing useful to queue.
+  function gestureInProgress(){
+    return drawing || document.documentElement.classList.contains('moving-ink');
+  }
+  function switchScene(idx){
+    if(gestureInProgress()) return;
+    if(idx===activeScene || idx<0 || idx>=scenes.length) return;
+    saveView();
+    activeScene = idx;
+    loadView();
+    loadLayer();
+    last = null;
+    positionFrame();
+    renderAll();
+  }
+  function addScene(){
+    scenes.push(newSceneData());
+    switchScene(scenes.length-1);
+  }
+  // symmetric counterpart to addScene: creates a new blank scene BEFORE
+  // the first one instead of after the last — lets the storyboard grow
+  // backwards (earlier shots) as well as forwards
+  function prependScene(){
+    if(gestureInProgress()) return;
+    saveView(); // persist the outgoing scene's state before indices shift
+    scenes.unshift(newSceneData());
+    activeScene = 0;
+    loadView();
+    loadLayer();
+    last = null;
+    positionFrame();
+    renderAll();
+  }
+  // Stacking convention for a scene's layers[]: index 0 is the BOTTOM of
+  // the stack, index length-1 is the TOP — layers[i] paints over
+  // layers[i-1], same order renderStaticLayers() already composites them
+  // in. "Above"/"below" throughout this section refer to that, not to
+  // draw order in time.
+  //
+  // Creates a new, empty layer ABOVE everything currently in the scene
+  // — appended at the end of the array — and switches to it. Mirrors
+  // addScene(): always available no matter how many layers already sit
+  // above the one you started from, exactly like the brief asks for.
+  function addLayerAbove(){
+    if(gestureInProgress()) return;
+    const sc = scenes[activeScene];
+    sc.layers.push({ segments: [], history: [], future: [], inkVersion: 0 });
+    sc.inkVersion = (sc.inkVersion||0) + 1;
+    switchLayer(sc.layers.length-1);
+  }
+  // Symmetric counterpart: creates a new, empty layer BELOW everything
+  // currently in the scene — inserted at the front of the array — and
+  // switches to it. Mirrors prependScene(): every existing layer's index
+  // shifts up by one, so activeLayer is set directly (0) rather than
+  // patched, same reason prependScene() sets activeScene=0 directly
+  // instead of trying to track the shift. Doesn't go through
+  // switchLayer() itself: that function's own "already active" guard
+  // compares against the OLD (about to be stale) activeLayer, which
+  // isn't meaningful once every index has just moved.
+  function addLayerBelow(){
+    if(gestureInProgress()) return;
+    const sc = scenes[activeScene];
+    sc.layers.unshift({ segments: [], history: [], future: [], inkVersion: 0 });
+    sc.inkVersion = (sc.inkVersion||0) + 1;
+    sc.activeLayer = 0;
+    last = null;
+    loadLayer();
+    renderAll();
+  }
+  // Switching layers never touches frame/camera — every layer in a scene
+  // shares that scene's own single frame/zoom/pan (the brief: layers are
+  // uniform size/format, unlike scenes). Only which segment list is
+  // "live" for drawing/undo changes, plus which OTHER layers now need
+  // compositing above vs below it — see renderStaticLayers().
+  function switchLayer(idx){
+    if(gestureInProgress()) return;
+    const sc = scenes[activeScene];
+    if(idx===sc.activeLayer || idx<0 || idx>=sc.layers.length) return;
+    sc.activeLayer = idx;
+    last = null;
+    loadLayer();
+    renderAll();
+  }
   // ghost/background-duplicate layer intentionally removed from the active
   // logic (see brief) — the `ghost` canvas element stays in the DOM as a
   // placeholder, reserved for a future, different treatment.
+  // RESERVED (not a bug, do not delete): planned to show a large preview
+  // of a frame's saved drawing behind it the first time that frame is
+  // opened, for a dramatic "reveal" effect. Remove this comment and the
+  // reservation once that feature is actually implemented.
 
   // standard aspect-ratio presets for the top-left "format" handle
   const PRESETS = [
@@ -159,32 +575,74 @@
   }
 
   // elastic (rubber-band) format snapping state for the top-left handle
-  const elastic = { active:false, center:{x:0,y:0}, targetW:640, targetH:360, label:'' };
+  const elastic = { active:false, center:{x:0,y:0}, targetW:640, targetH:360 };
 
   function resize(){
     W = window.innerWidth; H = window.innerHeight;
-    CW = Math.round(W*2.4); CH = Math.round(H*2.4);
-    canvasOriginX = 0; canvasOriginY = 0;
+    // #world's own box size is set ONCE, from whatever the window size
+    // happens to be the first time this runs, and never touched again.
+    // It's just a stable reference point (its center is where every
+    // scene's frame gets centered on) — it does NOT bound where ink can
+    // be drawn or how far the canvas can pan/zoom, so there's no upside
+    // to keeping it "in sync" with the window, and a real downside: every
+    // previously-drawn stroke is stored in absolute coordinates and never
+    // moves on its own, so re-anchoring this reference point on every
+    // resize would silently drag the frame (and the tools that follow it)
+    // away from ink that rightfully hasn't gone anywhere.
+    if(WORLD_W===undefined){
+      WORLD_W = Math.round(W*2.4); WORLD_H = Math.round(H*2.4);
+      // panY was set to -VERTICAL_BIAS before H was known (see its
+      // declaration) — now that it is, correct it to the real,
+      // viewport-aware value. Safe to just overwrite here: this only
+      // runs once, before the very first paint, so there's no user pan
+      // yet to clobber.
+      panY = -effectiveBias();
+      scenes[0].panY = panY;
+    }
+    // CW/CH describe the canvas bitmap's current coverage window and are
+    // SUPPOSED to change — but they're no longer set eagerly here. This
+    // used to unconditionally allocate CW=W*2.4 / CH=H*2.4 (UNCAPPED) on
+    // every load and every browser resize, across all 9 canvases below —
+    // on a large or HiDPI display that's a multi-gigabyte allocation
+    // (e.g. roughly 1.7GB total at 1920x1080 @2x DPR, considerably more
+    // at 4K), i.e. exactly the class of freeze ensureCanvasCoverage()'s
+    // own MAX_CANVAS_DIM cap further below already exists to fix for the
+    // pan/zoom case (see its comment: a measured 16s load/freeze) — that
+    // fix just never got applied to this, the far more common, path.
+    // Forcing canvasOriginX/Y/CW/CH to a guaranteed-stale (0,0,0,0) state
+    // means positionFrame() below — which already calls
+    // ensureCanvasCoverage() — performs the real sizing itself, at that
+    // same existing cap, instead of duplicating an uncapped copy of it
+    // here. CW/CH=0 can never satisfy ensureCanvasCoverage()'s "already
+    // covered" check, so it's guaranteed to actually (re)size on this
+    // first call rather than silently no-op.
+    canvasOriginX = 0; canvasOriginY = 0; CW = 0; CH = 0;
 
-    world.style.left = ((W-CW)/2)+'px';
-    world.style.top = ((H-CH)/2)+'px';
-    world.style.width = CW+'px';
-    world.style.height = CH+'px';
+    world.style.left = ((W-WORLD_W)/2)+'px';
+    world.style.top = ((H-WORLD_H)/2)+'px';
+    world.style.width = WORLD_W+'px';
+    world.style.height = WORLD_H+'px';
 
-    // always recenter the drawing area on the canvas center, on every
-    // resize (not just the first run) — otherwise the frame stays at its
-    // old world coordinates while the canvas grows/shrinks, and visually
-    // drifts toward whichever side the window is being resized from
-    frame.x = CW/2 - frame.w/2;
-    frame.y = CH/2 - frame.h/2;
-
-    [ghost, front, notes].forEach(c=>{
-      c.width = CW*DPR; c.height = CH*DPR;
-      c.style.width = CW+'px'; c.style.height = CH+'px';
-      c.style.left = '0px'; c.style.top = '0px';
-      c.getContext('2d').setTransform(DPR,0,0,DPR,0,0);
+    // recenter every scene's own drawing window within #world's box.
+    // WORLD_W/H themselves don't change after the first run, but a
+    // scene's frame.w/h can (via the resize handles) between browser
+    // resizes, so this still needs to run every time to keep it centered
+    // — it just does so around the same fixed reference point as always.
+    scenes.forEach(sc=>{
+      sc.frame.x = WORLD_W/2 - sc.frame.w/2;
+      sc.frame.y = WORLD_H/2 - sc.frame.h/2;
     });
+
+    // canvas sizing itself now happens inside positionFrame() ->
+    // ensureCanvasCoverage() below (capped at MAX_CANVAS_DIM), not here.
+    updateZoom();
     positionFrame();
+    // positionFrame() now calls applyView() internally (see its
+    // definition) — this comment stays here as a pointer for anyone who
+    // remembers the old two-call pattern and comes looking for why a
+    // narrow-window resize used to leave the page rendered at the wrong
+    // scale: updateZoom() alone only recomputes the viewZoom *number*,
+    // something still has to push it into #world's CSS transform.
     renderAll();
   }
 
@@ -197,6 +655,17 @@
   // instead of trying to pre-cover every coordinate the user could ever
   // reach. Returns true if it actually resized (caller must then redraw).
   const COVERAGE_MARGIN = 400, COVERAGE_PAD = 600;
+  // hard ceiling on the canvas bitmap's own size, independent of how far
+  // zoomed out the camera gets. Without this, ensureCanvasCoverage()
+  // sizes the bitmap to match however much world-space is visible on
+  // screen — which grows without bound as viewZoom shrinks (e.g. at
+  // 0.05x on a 1280px-wide view, that's 25,000+ px of canvas before
+  // padding, on EACH of three layers). Measured a 16-second load/freeze
+  // hitting this on an extreme viewport before adding the cap. Ink
+  // outside the capped area simply won't be covered by the bitmap at
+  // such extreme zoom-out — an acceptable tradeoff, since individual
+  // strokes are already near-invisible at that scale anyway.
+  const MAX_CANVAS_DIM = 3000;
   function ensureCanvasCoverage(){
     const tl = toWorld(0,0), br = toWorld(W,H);
     const minX = Math.min(tl.x,br.x), maxX = Math.max(tl.x,br.x);
@@ -207,9 +676,9 @@
     }
     canvasOriginX = minX - COVERAGE_PAD;
     canvasOriginY = minY - COVERAGE_PAD;
-    CW = (maxX-minX) + COVERAGE_PAD*2;
-    CH = (maxY-minY) + COVERAGE_PAD*2;
-    [ghost, front, notes].forEach(c=>{
+    CW = Math.min(MAX_CANVAS_DIM, (maxX-minX) + COVERAGE_PAD*2);
+    CH = Math.min(MAX_CANVAS_DIM, (maxY-minY) + COVERAGE_PAD*2);
+    [ghost, front, frontBelow, frontAbove, notes, notesBelow, notesAbove, groupScratchF, groupScratchN].forEach(c=>{
       c.width = CW*DPR; c.height = CH*DPR;
       c.style.width = CW+'px'; c.style.height = CH+'px';
       c.style.left = canvasOriginX+'px'; c.style.top = canvasOriginY+'px';
@@ -229,7 +698,10 @@
   function updateClipPath(){
     const r = frameRect();
     const bleed = 1;
-    front.style.clipPath = `inset(${r.y-canvasOriginY-bleed}px ${(canvasOriginX+CW)-(r.x+r.w)-bleed}px ${(canvasOriginY+CH)-(r.y+r.h)-bleed}px ${r.x-canvasOriginX-bleed}px round ${CORNER_R}px)`;
+    const clip = `inset(${r.y-canvasOriginY-bleed}px ${(canvasOriginX+CW)-(r.x+r.w)-bleed}px ${(canvasOriginY+CH)-(r.y+r.h)-bleed}px ${r.x-canvasOriginX-bleed}px round ${CORNER_R}px)`;
+    front.style.clipPath = clip;
+    frontBelow.style.clipPath = clip;
+    frontAbove.style.clipPath = clip;
   }
 
   // --- camera focus: is the window near the viewport's center right now? ---
@@ -238,7 +710,7 @@
   function isFocused(){
     const r = frameBox.getBoundingClientRect();
     const cx = r.left + r.width/2, cy = r.top + r.height/2;
-    return Math.hypot(cx - W/2, cy - H/2) <= FOCUS_SNAP;
+    return Math.hypot(cx - W/2, cy - (H/2 - effectiveBias())) <= FOCUS_SNAP;
   }
   // true only once the window has fully left the viewport — distinct from
   // isFocused(), which is about being centered, not merely visible
@@ -293,7 +765,8 @@
   function recenterView(){
     panFrom = { x:panX, y:panY };
     panStart = performance.now();
-    panTarget = { x:0, y:0 };
+    panTarget = { x:0, y:-effectiveBias() };
+    ensureTickRunning();
   }
 
   const BLACK_OPTS = erase => ({color:'rgba(30,28,24,.88)', width: erase?16:2.2, erase});
@@ -307,48 +780,633 @@
   // redraws both layers from scratch. This is what makes previously-hidden
   // (white) ink turn black in real time as the window edge sweeps over it,
   // and vice versa — the classification is purely a render-time concern.
-  function renderAll(){
-    fctx.clearRect(0,0,CW,CH);
-    nctx.clearRect(0,0,CW,CH);
-    const r = frameRect();
-    strokeSegments.forEach(seg=>{
+  // Split from renderAll() below so a high-frequency caller (the move-ink
+  // drag) can redraw the strokes on every pointermove without also paying
+  // for a full filmstrip re-render (all scene thumbnails) on every one of
+  // those — same reason plain drawing already defers its renderFilmstrip()
+  // call to pointerup instead of doing it inside draw().
+  //
+  // Shared by renderStrokes() and renderStaticLayers(): classifies each
+  // segment as inside/outside/crossing the frame and strokes it onto
+  // whichever of the two given contexts it belongs to, splitting a
+  // crossing segment at the exact boundary point. Both callers work in
+  // the same absolute/world coordinate space (canvasOriginX/Y offset via
+  // strokeSeg), unlike the thumbnail renderers below, which map into a
+  // small tile-local space instead and so keep their own copy of this
+  // same classification instead of sharing it.
+  function classifyAndStroke(segs, r, blackCtx, whiteCtx){
+    segs.forEach(seg=>{
       const aIn = inFrameRect(seg.a, r), bIn = inFrameRect(seg.b, r);
       if(aIn && bIn){
-        strokeSeg(fctx, seg.a, seg.b, BLACK_OPTS(seg.erase));
+        strokeSeg(blackCtx, seg.a, seg.b, BLACK_OPTS(seg.erase));
       } else if(!aIn && !bIn){
-        strokeSeg(nctx, seg.a, seg.b, WHITE_OPTS(seg.erase));
+        strokeSeg(whiteCtx, seg.a, seg.b, WHITE_OPTS(seg.erase));
       } else {
         const exit = aIn ? rectExit(seg.a, seg.b, r) : rectExit(seg.b, seg.a, r);
         const inPt = aIn ? seg.a : seg.b, outPt = aIn ? seg.b : seg.a;
-        strokeSeg(fctx, inPt, exit, BLACK_OPTS(seg.erase));
-        strokeSeg(nctx, exit, outPt, WHITE_OPTS(seg.erase));
+        strokeSeg(blackCtx, inPt, exit, BLACK_OPTS(seg.erase));
+        strokeSeg(whiteCtx, exit, outPt, WHITE_OPTS(seg.erase));
       }
     });
   }
-  // permanently scales the WHOLE drawing (visible and currently-hidden
-  // parts alike) around a fixed center — this is the one operation that
-  // actually changes what's drawn (a real zoom), as opposed to just
-  // moving/resizing the window looking at it
-  function scaleInsideAround(center, factor){
-    strokeSegments.forEach(seg=>{
-      seg.a = { x: center.x+(seg.a.x-center.x)*factor, y: center.y+(seg.a.y-center.y)*factor };
-      seg.b = { x: center.x+(seg.b.x-center.x)*factor, y: center.y+(seg.b.y-center.y)*factor };
+  // Active layer only — this is the canvas draw() also paints onto live,
+  // incrementally, while a stroke is in progress. Fully re-classifying it
+  // from scratch here (rather than trusting the incremental result) is
+  // what makes undo/redo/clear correct: they mutate strokeSegments and
+  // then call this to make the pixels match, with no assumption about
+  // what was on screen a moment before.
+  function renderStrokes(){
+    fctx.clearRect(0,0,CW,CH);
+    nctx.clearRect(0,0,CW,CH);
+    classifyAndStroke(strokeSegments, frameRect(), fctx, nctx);
+  }
+  // Flattens every OTHER layer of the active scene (i.e. everything
+  // except the one currently live on front/notes) into two composites by
+  // real stacking position: frontBelow/notesBelow for every layer with a
+  // LOWER index than the active one (painted UNDER front/notes), and
+  // frontAbove/notesAbove for every HIGHER-index layer (painted OVER
+  // front/notes). Each non-active layer is drawn onto a shared, reused
+  // scratch pair FIRST and only THEN copied onto whichever of the two
+  // group buffers it belongs to — that isolation is what stops an
+  // eraser stroke on one layer from eating into a different layer's ink,
+  // since destination-out only ever acts on whatever's already on the
+  // SAME bitmap. Only runs when the active layer or scene changes (see
+  // switchLayer/switchScene/addLayerAbove/addLayerBelow), never
+  // per-stroke — layer switches are rare, deliberate clicks, not a
+  // per-pointermove hot path.
+  function renderStaticLayers(){
+    const sc = scenes[activeScene];
+    const r = frameRect();
+    fctxBelow.clearRect(0,0,CW,CH); nctxBelow.clearRect(0,0,CW,CH);
+    fctxAbove.clearRect(0,0,CW,CH); nctxAbove.clearRect(0,0,CW,CH);
+    sc.layers.forEach((layer,i)=>{
+      if(i===sc.activeLayer) return;
+      gsfCtx.clearRect(0,0,CW,CH); gsnCtx.clearRect(0,0,CW,CH);
+      classifyAndStroke(layer.segments, r, gsfCtx, gsnCtx);
+      const targetF = i < sc.activeLayer ? fctxBelow : fctxAbove;
+      const targetN = i < sc.activeLayer ? nctxBelow : nctxAbove;
+      [[targetF,groupScratchF],[targetN,groupScratchN]].forEach(([dst,src])=>{
+        // reset to identity first: dst already carries the DPR transform
+        // (see the resize forEach above), and src's backing store is
+        // ALREADY at physical DPR resolution — drawing through the DPR
+        // transform a second time here would scale it up twice over
+        dst.save(); dst.setTransform(1,0,0,1,0,0);
+        dst.drawImage(src,0,0);
+        dst.restore();
+      });
+    });
+  }
+  function renderAll(){
+    renderStrokes();
+    renderStaticLayers();
+    renderFilmstrip();
+    renderLayerRail();
+  }
+  // Live-resize gestures (the format/elastic handle below, and the free
+  // aspect-preserving zoom-resize corners) used to call renderAll() on
+  // every single animation frame / pointermove. renderStaticLayers()'s
+  // own comment says it's meant only for rare layer/scene-switch events,
+  // "never a per-pointermove hot path" — but that's exactly what both
+  // resize gestures were doing to it, plus renderFilmstrip() (rebuilds a
+  // canvas thumbnail for EVERY scene) and renderLayerRail() (rebuilds one
+  // for every layer in the active scene), every frame, for the gesture's
+  // whole duration. Cost scales with total project size (scenes × layers
+  // × strokes), so this gets more noticeable the more you've drawn —
+  // which matches "gets laggy resizing" rather than a fixed one-time cost.
+  // None of those three need to track the gesture frame-by-frame: other
+  // scenes' own frames aren't moving (only the one being resized is), and
+  // the periphery (other layers, other thumbnails) not updating for the
+  // ~0.3s a gesture takes is imperceptible — attention is on the frame
+  // border actually moving. So during a live gesture: keep renderStrokes()
+  // (active layer only, cheap, needed so the ink you're LOOKING at tracks
+  // the frame in real time) at full rate, coalesce the other three to at
+  // most once per animation frame regardless of how many events fire
+  // within it, and throttle renderStaticLayers further still since it has
+  // no live-tracking value at all. Either gesture's own end always forces
+  // one final untimed renderAll(), so nothing stays stale once input stops.
+  // UPDATE: this throttle used to only be reached from the two gesture
+  // handlers that call it explicitly (below). applyView() — which runs
+  // on every wheel tick, every corner/format-drag pointermove, and every
+  // recenter/elastic animation frame — had its OWN, unthrottled path to
+  // the exact same two expensive renders, via positionFilmstrip()/
+  // positionLayerRail() calling renderFilmstrip()/renderLayerRail()
+  // directly. That was the actual leak: fixed by having those two
+  // functions call scheduleHeavyRerender() too (see their own
+  // definitions), so every path into a heavy rebuild now goes through
+  // this one coalescing point.
+  let heavyRerenderRAF = null, heavyRerenderFrame = 0;
+  // Per-scene / per-layer thumbnail bitmap cache: object identity -> a
+  // small persistent offscreen canvas, plus the ink-version, pixel size,
+  // and frame geometry it was last painted at. renderFilmstrip()/
+  // renderLayerRail() check this before re-stroking every segment of
+  // every layer of every scene — most calls (switching which scene/layer
+  // is active, panning, resizing a DIFFERENT scene's frame than the one
+  // shown, or the throttled callback above firing mid-gesture) touch no
+  // ink and no geometry for most tiles at all, so almost every tile
+  // becomes one cheap drawImage() blit instead of a full re-paint. Only
+  // a tile whose own scene/layer actually changed pays the real cost.
+  // Three independent triggers invalidate a cached tile: inkVersion
+  // (bumped by markInkChanged(), below, and directly in
+  // addLayerAbove/Below) catches drawing/undo/redo/clear/move; the
+  // pixel-size check catches a sharper redraw being worth it after a
+  // window resize; the frame-geometry signature catches a corner/format
+  // resize changing what fraction of the frame a given stroke occupies
+  // even when the frame's ASPECT ratio (and so its tile's pixel size)
+  // hasn't changed — ink itself is stored in fixed world coordinates, so
+  // resizing the frame window around it is a real visual change these
+  // thumbnails must track despite never touching inkVersion.
+  const sceneThumbCache = new Map();
+  const layerThumbCache = new Map();
+  function frameSig(r){ return r.x+'|'+r.y+'|'+r.w+'|'+r.h; }
+  // Invalidates the cached thumbnail for whichever scene/layer is
+  // CURRENTLY active by bumping the counters the cache above compares
+  // against. Call this right after any mutation to strokeSegments (the
+  // active layer's own segment list) — draw, undo, redo, clear, or
+  // move-ink — so the next render knows this one tile can't be reused.
+  function markInkChanged(){
+    const sc = scenes[activeScene];
+    sc.inkVersion = (sc.inkVersion||0) + 1;
+    sc.layers[sc.activeLayer].inkVersion = (sc.layers[sc.activeLayer].inkVersion||0) + 1;
+  }
+  function scheduleHeavyRerender(){
+    if(heavyRerenderRAF) return;
+    heavyRerenderRAF = requestAnimationFrame(()=>{
+      heavyRerenderRAF = null;
+      heavyRerenderFrame++;
+      renderFilmstrip();
+      renderLayerRail();
+      if(heavyRerenderFrame % 4 === 0) renderStaticLayers();
     });
   }
 
+  // --- storyboard filmstrip: thumbnails + show/hide on cursor position ---
+  const filmstripEl = document.getElementById('filmstrip');
+  const filmTrack = document.getElementById('filmTrack');
+  // Fixed number of tiles visible across the frame's own width — a
+  // deliberate, legible size rather than shrinking tiles to cram more in.
+  // Once there are more slots than this (more scenes to add/browse), the
+  // strip scrolls sideways instead, with the edges dissolving via the
+  // mask in CSS rather than hard-clipping a tile mid-way.
+  const VISIBLE_COUNT = 6;
+  const FADE_PX = 28;
+  function renderFilmstrip(){
+    filmTrack.innerHTML = '';
+    const GAP = 8;
+    const availW = frameBox.getBoundingClientRect().width;
+    // tile size is derived ONLY from fitting exactly VISIBLE_COUNT tiles
+    // across the frame's width — it no longer shrinks just because more
+    // scenes exist; extra slots scroll instead of squeezing everyone in
+    let tw = (availW - GAP*(VISIBLE_COUNT-1)) / VISIBLE_COUNT;
+    tw = Math.max(34, Math.min(140, tw));
+    // fits a tile of the given aspect ratio within (maxW x MAX_TILE_H),
+    // shrinking its WIDTH (never its height) once that cap is hit — a
+    // portrait scene's tile gets narrower rather than taller, so it can
+    // never push the tray itself below the visible viewport regardless of
+    // how extreme that scene's own format is
+    const fitTile = aspect => {
+      let w = tw, h = w/aspect;
+      if(h > MAX_TILE_H){ h = MAX_TILE_H; w = h*aspect; }
+      return { w, h };
+    };
+    // "+" add-slot tiles don't belong to any particular scene, so they
+    // fall back to the currently active shot's own aspect for sizing
+    const addTile = fitTile(frame.w/frame.h);
+    // total slots: always keep room for every real scene PLUS at least
+    // one empty "add" slot in front of the first and behind the last, so
+    // it's always possible to grow the storyboard either direction — this
+    // can exceed VISIBLE_COUNT, in which case the row scrolls
+    const count = Math.max(VISIBLE_COUNT, scenes.length+2);
+    // where the block of real, drawn scenes sits within the row. Fixed at 1
+    // (a single leading "add" slot) rather than recentered every render —
+    // recentering used to shift the whole block sideways each time a scene
+    // was added/removed, which read as the filmstrip jittering left.
+    // Growth now only adds/removes slots at the trailing edge, so existing
+    // tiles never move.
+    const sceneStart = 1;
+
+    // Fade should reflect whether `count` slots actually overflow availW,
+    // not just whether count>VISIBLE_COUNT — those aren't the same thing.
+    // Tiles aren't uniform width here (each scene keeps its own aspect
+    // ratio via fitTile above), so — unlike the layer rail's same-size
+    // circles — the real total can't be derived from a single tw; each
+    // slot's actual width is summed instead, mirroring the same
+    // sceneIdx/sceneStart lookup the render loop below uses, so this stays
+    // consistent with whatever actually gets drawn.
+    let contentW = 0;
+    for(let i=0; i<count; i++){
+      const sceneIdx = i - sceneStart;
+      const sc = (sceneIdx>=0 && sceneIdx<scenes.length) ? scenes[sceneIdx] : null;
+      contentW += sc ? fitTile(sc.frame.w/sc.frame.h).w : addTile.w;
+    }
+    contentW += GAP*(count-1);
+    filmTrack.style.setProperty('--fade', (contentW > availW + 0.5 ? FADE_PX : 0)+'px');
+
+    let activeEl = null;
+    for(let i=0; i<count; i++){
+      const sceneIdx = i - sceneStart;
+      if(sceneIdx>=0 && sceneIdx<scenes.length){
+        const sc = scenes[sceneIdx];
+        // map through THIS scene's own window, never the active one's —
+        // otherwise resizing/reformatting one panel would visibly distort
+        // every other panel's thumbnail too
+        const r = sc.frame;
+        const { w:tileW, h:tileH } = fitTile(r.w/r.h);
+        const thumb = document.createElement('canvas');
+        thumb.className = 'filmThumb' + (sceneIdx===activeScene ? ' active' : '');
+        thumb.width = tileW*2; thumb.height = tileH*2;
+        thumb.style.width = tileW+'px'; thumb.style.height = tileH+'px';
+        const pxW = thumb.width, pxH = thumb.height; // browser-coerced integer size, used as the cache key
+        const sig = frameSig(r);
+
+        // The re-stroke-every-segment-of-every-layer work below is the
+        // expensive part — skip it whenever this scene's ink, this
+        // tile's pixel size, and this scene's frame geometry are all
+        // unchanged since the last time it was painted, and just blit
+        // the cached bitmap instead. On a typical render (switching
+        // scenes, panning, resizing a DIFFERENT scene's frame) only the
+        // scene actually being edited misses the cache.
+        let cache = sceneThumbCache.get(sc);
+        if(!cache || cache.version!==sc.inkVersion || cache.w!==pxW || cache.h!==pxH || cache.sig!==sig){
+          if(!cache){ cache = { canvas: document.createElement('canvas') }; sceneThumbCache.set(sc, cache); }
+          cache.canvas.width = pxW; cache.canvas.height = pxH;
+          cache.w = pxW; cache.h = pxH; cache.version = sc.inkVersion; cache.sig = sig;
+          const tctx = cache.canvas.getContext('2d');
+          tctx.scale(2,2);
+          tctx.fillStyle = '#f4f2ee';
+          tctx.fillRect(0,0,tileW,tileH);
+          const map = pt => ({ x:(pt.x-r.x)/r.w*tileW, y:(pt.y-r.y)/r.h*tileH });
+          // scale stroke width by the SAME factor as the geometry, so the
+          // thumbnail reflects the real drawing's actual proportions rather
+          // than a fixed pixel width that reads as disproportionately bold
+          // once a shot is shrunk down a lot (e.g. a small tile sitting
+          // next to a much bigger active one) — matches BLACK_OPTS' real
+          // on-canvas widths (2.2 normal / 16 erase), just scaled down.
+          // Floored so a very small tile's line doesn't fade to invisible.
+          const thumbScale = tileW / r.w;
+          const paintLayer = (segs, ctx) => segs.forEach(seg=>{
+            const aIn = inFrameRect(seg.a,r), bIn = inFrameRect(seg.b,r);
+            if(!aIn && !bIn) return;
+            let a=seg.a, b=seg.b;
+            if(!(aIn && bIn)){
+              const exit = aIn ? rectExit(a,b,r) : rectExit(b,a,r);
+              if(aIn) b = exit; else a = exit;
+            }
+            const ma = map(a), mb = map(b);
+            ctx.save();
+            if(seg.erase) ctx.globalCompositeOperation = 'destination-out';
+            ctx.strokeStyle = 'rgba(30,28,24,.88)';
+            ctx.lineWidth = Math.max(0.4, (seg.erase ? 16 : 2.2) * thumbScale);
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(ma.x,ma.y); ctx.lineTo(mb.x,mb.y);
+            ctx.stroke();
+            ctx.restore();
+          });
+          // paint every layer in stacking order, each isolated on a small
+          // reused scratch tile first and only then flattened onto the
+          // cached bitmap — same reasoning as renderStaticLayers() above:
+          // without this, an eraser stroke on one layer could eat into a
+          // different layer's ink the moment they share one bitmap.
+          const tileScratch = document.createElement('canvas');
+          tileScratch.width = pxW; tileScratch.height = pxH;
+          const scCtx = tileScratch.getContext('2d');
+          scCtx.scale(2,2);
+          sc.layers.forEach(layer=>{
+            scCtx.clearRect(0,0,tileW,tileH);
+            paintLayer(layer.segments, scCtx);
+            tctx.save(); tctx.setTransform(1,0,0,1,0,0);
+            tctx.drawImage(tileScratch,0,0);
+            tctx.restore();
+          });
+        }
+        thumb.getContext('2d').drawImage(cache.canvas, 0, 0);
+        thumb.title = 'Кадр ' + (sceneIdx+1);
+        thumb.addEventListener('pointerdown', ev=>{ ev.stopPropagation(); switchScene(sceneIdx); });
+        filmTrack.appendChild(thumb);
+        if(sceneIdx===activeScene) activeEl = thumb;
+      } else {
+        // empty slot: in front of the real block -> prepend a new scene
+        // before the first one; behind it -> append a new scene after
+        // the last one. Both are otherwise identical dashed "+" tiles.
+        const addBtn = document.createElement('div');
+        addBtn.className = 'filmAdd';
+        addBtn.style.width = addTile.w+'px'; addBtn.style.height = addTile.h+'px';
+        addBtn.textContent = '+';
+        const isFront = sceneIdx<0;
+        addBtn.title = isFront ? 'Новый кадр (в начало)' : 'Новый кадр';
+        addBtn.addEventListener('pointerdown', ev=>{
+          ev.stopPropagation();
+          if(isFront) prependScene(); else addScene();
+        });
+        filmTrack.appendChild(addBtn);
+      }
+    }
+    // keep the active tile in view (no-op if it's already fully visible).
+    // NOTE: deliberately NOT using activeEl.scrollIntoView() here — when
+    // filmTrack alone can't satisfy inline centering (not enough scroll
+    // room), the browser's ancestor walk falls through to #stage (which
+    // has overflow:hidden, but is still a legal scroll target per spec)
+    // and scrolls IT instead, dragging the whole canvas/toolbar/zoom UI
+    // sideways with it. Computing scrollLeft by hand keeps the effect
+    // strictly local to the strip, no matter how little room it has.
+    if(activeEl){
+      const target = activeEl.offsetLeft + activeEl.offsetWidth/2 - filmTrack.clientWidth/2;
+      const maxScroll = filmTrack.scrollWidth - filmTrack.clientWidth;
+      filmTrack.scrollLeft = Math.max(0, Math.min(target, maxScroll));
+    }
+  }
+
+  // reveal the tray once the cursor drops below the drawing window's own
+  // screen rect (or is already resting over the tray itself); hide it again
+  // after a short grace delay so crossing the gap between window and tray
+  // doesn't flicker it off
+  let filmVisible = false, filmHideTimer = null;
+  function updateFilmstripVisibility(clientX, clientY, target){
+    const overTray = !!(target && target.closest && target.closest('#filmstrip'));
+    const r = frameBox.getBoundingClientRect();
+    const belowFrame = clientY > r.bottom - 8 && clientX > r.left - 40 && clientX < r.right + 40;
+    const show = overTray || belowFrame;
+    if(show){
+      if(filmHideTimer){ clearTimeout(filmHideTimer); filmHideTimer = null; }
+      if(!filmVisible){ filmVisible = true; filmstripEl.classList.add('visible'); }
+    } else if(filmVisible && !filmHideTimer){
+      filmHideTimer = setTimeout(()=>{
+        filmVisible = false; filmstripEl.classList.remove('visible'); filmHideTimer = null;
+      }, 300);
+    }
+  }
+  // anchors the tray directly under the drawing window's live on-screen
+  // rect (same trick as syncHandles/focusRing) so it stays magnetized to
+  // the canvas through pan/zoom/resize instead of sitting at a fixed
+  // viewport position
+  function positionFilmstrip(){
+    const r = frameBox.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
+    filmstripEl.style.left = (r.left - sr.left) + 'px';
+    filmstripEl.style.top = (r.bottom - sr.top + TRAY_GAP) + 'px';
+    filmstripEl.style.width = r.width + 'px';
+    // Content rebuild goes through the same rAF-coalesced path as every
+    // other camera-driven update (scheduleHeavyRerender, below) instead
+    // of calling renderFilmstrip() directly here. This function is
+    // called unconditionally from applyView() on literally every
+    // wheel/pointermove/animation-frame tick that touches the camera —
+    // calling the full (DOM-churning, O(all scenes' ink)) rebuild here
+    // directly was exactly the gap that let it fire at full event rate
+    // regardless of the throttle scheduleHeavyRerender() was built to
+    // provide (see its own comment below). Positioning the tray element
+    // itself, above, still happens every time — only the expensive
+    // repaint of its contents is now coalesced.
+    scheduleHeavyRerender();
+  }
+
+  // --- layer rail: circles + show/hide on cursor position, right of frame ---
+  // Same appear-on-hover / scroll-with-fade mechanic as the filmstrip
+  // above, rotated 90°, and the SAME asymmetric leading/trailing layout
+  // too: one FIXED "add above" circle at the very top (never padded,
+  // mirrors the filmstrip's own sceneStart=1), the real layers right
+  // under it in real stacking order (highest index nearest the top, so
+  // the topmost layer sits right below that one circle, near the top of
+  // the rail — not centered), and every remaining slot is "add below",
+  // stretching down to fill the rail the same way the filmstrip's
+  // append side grows. The one real difference from the filmstrip,
+  // per the brief: circles are a FIXED shape (not reshaped per scene's
+  // aspect, since every layer already shares its one scene's own frame).
+  const layerRailEl = document.getElementById('layerRail');
+  const layerTrack = document.getElementById('layerTrack');
+  const VISIBLE_COUNT_LAYERS = 5;
+  const LAYER_FADE_PX = 24;
+  function renderLayerRail(){
+    layerTrack.innerHTML = '';
+    const GAP = 8;
+    const availH = frameBox.getBoundingClientRect().height;
+    const sc = scenes[activeScene];
+    // The rail's normal circle size isn't a guess — it's exactly what the
+    // OLD per-height formula used to compute LIVE, evaluated once at this
+    // app's own canonical default project: a fresh 640×360 scene on-screen
+    // at 100% zoom, i.e. frame.h*viewZoom === 360 (see FIT_REF above).
+    // Derived from GAP/VISIBLE_COUNT_LAYERS right here (not copied as
+    // separate magic numbers elsewhere) so it can't silently drift out of
+    // sync if either constant ever changes.
+    const LAYER_D = (360 - GAP*(VISIBLE_COUNT_LAYERS-1)) / VISIBLE_COUNT_LAYERS; // 65.6
+    // how many slots we WANT visible at the rail's normal fixed size —
+    // pad up to VISIBLE_COUNT_LAYERS when there are few real layers, so
+    // the rail doesn't look sparse. This target doesn't depend on availH.
+    const wantCount = Math.max(VISIBLE_COUNT_LAYERS, sc.layers.length+2);
+    let td = LAYER_D; // fixed size, unless the shrink branch below kicks in
+    let count = wantCount;
+    const neededForWant = wantCount*td + (wantCount-1)*GAP;
+    if(availH >= neededForWant){
+      // room to spare beyond what wantCount needs at the fixed size — GROW
+      // the count (more add-slots) rather than the circles, to use up the
+      // slack. This is the tall/portrait-frame case from the original ask.
+      const fitCount = Math.floor((availH+GAP)/(td+GAP));
+      count = Math.max(wantCount, fitCount);
+    } else {
+      // NOT enough height for wantCount circles at the fixed size — the
+      // short/very-wide-frame case (e.g. 2.39:1). Previously td stayed
+      // fixed here and the rail's own overflow silently cropped the last
+      // circle. Instead, shrink every circle just enough that all
+      // wantCount of them fit with nothing cut off or hanging past the
+      // edge (floored at LAYER_D_MIN; past that the rail falls back to
+      // its existing scroll + fade, same as the filmstrip uses).
+      td = Math.max(LAYER_D_MIN, (availH - GAP*(wantCount-1)) / wantCount);
+    }
+    // Exactly mirrors the filmstrip's own sceneStart=1 approach: ONE
+    // fixed leading "add" slot (here: add-above) and never more, so the
+    // first real layer always sits right under it near the top of the
+    // TRACK — not centered, not pushed down by symmetric padding, WITHIN
+    // the track's own contents. All padding needed to keep the row
+    // looking full (out to VISIBLE_COUNT_LAYERS when there aren't enough
+    // real layers on their own) goes to the TRAILING end instead, same as
+    // the filmstrip's own append side — so "add below" is what stretches
+    // toward the bottom edge, never "add above".
+    // Separately, note #layerRail (the outer element, not this track) is
+    // `justify-content:center` in CSS — so whenever count/td leave any
+    // slack versus availH (routine: the GROW branch above deliberately
+    // stops at most one slot short of filling it), the track as a WHOLE
+    // sits centered with equal gaps above the first circle and below the
+    // last, rather than pinned flush to the top. That's expected, not a
+    // bug — just easy to mistake for one when eyeballing a screenshot.
+    const aboveSlots = 1;
+    // fade is a "there's more, scroll for it" hint — it should reflect
+    // whether the circles actually overflow the rail's real height, not
+    // whether we grew past the wantCount baseline. Growing (the branch
+    // above) is deliberately computed so everything still fits — a taller
+    // frame legitimately ending up with 6, 8, however many circles is not
+    // overflow, so it must not fade. Only the rare case where even
+    // LAYER_D_MIN couldn't shrink enough (see the else branch above)
+    // produces genuine overflow, and that's what this should catch.
+    const contentH = count*td + (count-1)*GAP;
+    layerTrack.style.setProperty('--fade', (contentH > availH + 0.5 ? LAYER_FADE_PX : 0)+'px');
+    const r = frame; // every layer in this scene shares this one frame
+    const sig = frameSig(r);
+    let activeEl = null;
+    for(let i=0;i<count;i++){
+      if(i<aboveSlots || i>=aboveSlots+sc.layers.length){
+        const above = i<aboveSlots;
+        const addBtn = document.createElement('div');
+        addBtn.className = 'layerAdd';
+        addBtn.style.width = td+'px'; addBtn.style.height = td+'px';
+        addBtn.textContent = '+';
+        addBtn.title = above ? 'Новый слой выше' : 'Новый слой ниже';
+        addBtn.addEventListener('pointerdown', ev=>{
+          ev.stopPropagation();
+          if(above) addLayerAbove(); else addLayerBelow();
+        });
+        layerTrack.appendChild(addBtn);
+        continue;
+      }
+      // first real-layer slot (right under the above-pool) shows the
+      // TOPMOST real layer (highest index); the last one (right above
+      // the below-pool) shows the BOTTOMMOST (index 0) — i.e. rail
+      // position mirrors array index, since the rail reads visually
+      // top-to-bottom but the array is indexed bottom-to-top (see
+      // addLayerAbove/Below's note)
+      const layerIdx = sc.layers.length - 1 - (i - aboveSlots);
+      const layer = sc.layers[layerIdx];
+      const thumb = document.createElement('canvas');
+      thumb.className = 'layerThumb' + (layerIdx===sc.activeLayer ? ' active' : '');
+      thumb.width = td*2; thumb.height = td*2;
+      thumb.style.width = td+'px'; thumb.style.height = td+'px';
+      const pxD = thumb.width; // browser-coerced integer size, used as the cache key
+
+      // same idea as the filmstrip's own cache above: skip re-stroking
+      // this one layer's segments unless its ink, this circle's pixel
+      // size, or the shared frame's geometry actually changed since the
+      // last time it was painted.
+      let cache = layerThumbCache.get(layer);
+      if(!cache || cache.version!==layer.inkVersion || cache.d!==pxD || cache.sig!==sig){
+        if(!cache){ cache = { canvas: document.createElement('canvas') }; layerThumbCache.set(layer, cache); }
+        cache.canvas.width = pxD; cache.canvas.height = pxD;
+        cache.d = pxD; cache.version = layer.inkVersion; cache.sig = sig;
+        const tctx = cache.canvas.getContext('2d');
+        tctx.scale(2,2);
+        // circular clip so content beyond the circle — necessarily
+        // present for any frame that isn't itself square, since the
+        // circle is a fixed shape unlike the filmstrip's per-scene
+        // aspect tiles — is cropped rather than squeezed to fit
+        tctx.save();
+        tctx.beginPath();
+        tctx.arc(td/2, td/2, td/2, 0, Math.PI*2);
+        tctx.clip();
+        tctx.fillStyle = '#f4f2ee';
+        tctx.fillRect(0,0,td,td);
+        // "cover" style crop, centered: the frame's SHORTER side exactly
+        // matches the circle's diameter, its longer side overflows past
+        // the circle edge and simply gets clipped — same idea as CSS
+        // background-size:cover, just done by hand for a canvas
+        const scale = td / Math.min(r.w, r.h);
+        const offX = (td - r.w*scale)/2, offY = (td - r.h*scale)/2;
+        const map = pt => ({ x:(pt.x-r.x)*scale + offX, y:(pt.y-r.y)*scale + offY });
+        // this circle shows ONLY its own layer's ink, never composited
+        // with any other layer — unlike the scene filmstrip thumbnail
+        // below the frame, which deliberately shows the whole picture.
+        // A single layer's own segments can never contain a stray
+        // destination-out that reaches outside itself, so no scratch/
+        // isolate step is needed here the way renderStaticLayers() and
+        // the scene thumbnail above both need one.
+        layer.segments.forEach(seg=>{
+          const aIn = inFrameRect(seg.a,r), bIn = inFrameRect(seg.b,r);
+          if(!aIn && !bIn) return;
+          let a=seg.a, b=seg.b;
+          if(!(aIn && bIn)){
+            const exit = aIn ? rectExit(a,b,r) : rectExit(b,a,r);
+            if(aIn) b = exit; else a = exit;
+          }
+          const ma = map(a), mb = map(b);
+          tctx.save();
+          if(seg.erase) tctx.globalCompositeOperation = 'destination-out';
+          tctx.strokeStyle = 'rgba(30,28,24,.88)';
+          tctx.lineWidth = Math.max(0.4, (seg.erase ? 16 : 2.2) * scale);
+          tctx.lineCap = 'round';
+          tctx.beginPath();
+          tctx.moveTo(ma.x,ma.y); tctx.lineTo(mb.x,mb.y);
+          tctx.stroke();
+          tctx.restore();
+        });
+        tctx.restore(); // pop the circular clip
+      }
+      thumb.getContext('2d').drawImage(cache.canvas, 0, 0);
+      thumb.title = 'Слой ' + (layerIdx+1);
+      thumb.addEventListener('pointerdown', ev=>{ ev.stopPropagation(); switchLayer(layerIdx); });
+      layerTrack.appendChild(thumb);
+      if(layerIdx===sc.activeLayer) activeEl = thumb;
+    }
+    // same hand-computed scroll as the filmstrip's own note above, for
+    // the same reason: scrollIntoView() here risks scrolling #stage
+    // itself instead of just this rail when the rail has little slack.
+    if(activeEl){
+      const target = activeEl.offsetTop + activeEl.offsetHeight/2 - layerTrack.clientHeight/2;
+      const maxScroll = layerTrack.scrollHeight - layerTrack.clientHeight;
+      layerTrack.scrollTop = Math.max(0, Math.min(target, maxScroll));
+    }
+  }
+  // reveal the rail once the cursor crosses to the right of the drawing
+  // window's own screen rect (or is already resting over the rail
+  // itself); hide it again after a short grace delay — identical logic
+  // to updateFilmstripVisibility(), just checking the right edge instead
+  // of the bottom one.
+  let railVisible = false, railHideTimer = null;
+  function updateLayerRailVisibility(clientX, clientY, target){
+    const overRail = !!(target && target.closest && target.closest('#layerRail'));
+    const r = frameBox.getBoundingClientRect();
+    const rightOfFrame = clientX > r.right - 8 && clientY > r.top - 40 && clientY < r.bottom + 40;
+    const show = overRail || rightOfFrame;
+    if(show){
+      if(railHideTimer){ clearTimeout(railHideTimer); railHideTimer = null; }
+      if(!railVisible){ railVisible = true; layerRailEl.classList.add('visible'); }
+    } else if(railVisible && !railHideTimer){
+      railHideTimer = setTimeout(()=>{
+        railVisible = false; layerRailEl.classList.remove('visible'); railHideTimer = null;
+      }, 300);
+    }
+  }
+  // anchors the rail directly right of the drawing window's live
+  // on-screen rect, same trick as positionFilmstrip()
+  function positionLayerRail(){
+    const r = frameBox.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
+    layerRailEl.style.left = (r.right - sr.left + RAIL_GAP) + 'px';
+    layerRailEl.style.top = (r.top - sr.top) + 'px';
+    layerRailEl.style.height = r.height + 'px';
+    // see positionFilmstrip()'s own comment just above — same fix, same
+    // reason: only the (cheap) position tracks the camera every tick,
+    // the (expensive) content rebuild is coalesced via scheduleHeavyRerender().
+    scheduleHeavyRerender();
+  }
   function positionFrame(){
     const r = frameRect();
     updateCornerRadius();
-    ensureCanvasCoverage();
+    // Captured once here and handed to applyView() below instead of
+    // letting it call ensureCanvasCoverage() a second time — positionFrame()
+    // always runs straight into applyView() within the same synchronous
+    // call, so the answer can't have changed in between, and this call
+    // isn't free (world.getBoundingClientRect() twice, plus a full
+    // (capped) canvas realloc + renderAll() on the rarer branch where
+    // coverage actually needs to grow).
+    const coverageChanged = ensureCanvasCoverage();
     updateClipPath();
     frameBox.style.left = r.x+'px';
     frameBox.style.top = r.y+'px';
     frameBox.style.width = r.w+'px';
     frameBox.style.height = r.h+'px';
-    ratioTag.style.left = (r.x - 4)+'px';
-    ratioTag.style.top = (r.y - 30)+'px';
-    updateFocus();
-    syncHandles();
+    // every caller of positionFrame() needs applyView() right after it
+    // anyway (even a frame-shape change still moves where things render
+    // on screen) — folding it in here means updateFocus/syncHandles/
+    // positionFilmstrip (which re-scans every visible scene's ink) each
+    // run once per call instead of twice, and removes the old trap of
+    // needing to remember to call both together.
+    applyView(coverageChanged);
+  }
+  // ratioTag lives outside #world (see markup), so its own size (font,
+  // padding, border-radius) stays fixed on screen regardless of camera
+  // zoom — same trick as focusRing/handles. Position is derived from
+  // frameBox's live screen rect, anchored just above its top-left corner.
+  function positionRatioTag(){
+    const r = frameBox.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
+    ratioTag.style.left = (r.left - sr.left - 4)+'px';
+    ratioTag.style.top = (r.top - sr.top - 30)+'px';
   }
   // handles live outside #world (see markup), so their on-screen size
   // stays fixed regardless of camera zoom — same trick as focusRing.
@@ -362,10 +1420,6 @@
       el.style.left = (corners[c][0]-sr.left)+'px';
       el.style.top = (corners[c][1]-sr.top)+'px';
     });
-  }
-
-  function inFrame(x,y){
-    return inFrameRect({x,y}, frameRect());
   }
 
   function strokeSeg(ctx, a, b, opts){
@@ -402,11 +1456,115 @@
   // The stroke stays whole in the data model — only the immediate visual
   // feedback splits it at the current window edge, mirroring renderAll()'s
   // per-frame classification instead of baking the split into the data.
+  // Shifts every point of the active layer's ink by a world-space delta,
+  // in place. strokeSegments is always a direct reference to whichever
+  // layer is currently active (see loadLayer), so this can never touch
+  // any other layer's — or any other scene's — ink; no extra scoping
+  // needed. Points are shared by reference between adjacent segments of
+  // the same stroke (draw() below links them that way: segment N's .b
+  // literally IS segment N+1's .a, not just an equal copy — confirmed
+  // empirically, not just by reading the code), so a naive per-segment
+  // += would double-shift every interior point of a multi-segment
+  // stroke. The seen-set visits each distinct point object exactly once
+  // regardless of how many segments reference it.
+  // NOTE: intentionally NOT recorded in history/future — undo/redo here is
+  // scoped to drawing (stroke) and clear actions only, per spec. Segment
+  // objects are shared by reference with any history/future entries that
+  // point at them, so a move silently carries those points along too;
+  // that's accepted as out of scope rather than solved.
+  function translateInk(dx, dy){
+    const seen = new Set();
+    strokeSegments.forEach(seg=>{
+      if(!seen.has(seg.a)){ seg.a.x+=dx; seg.a.y+=dy; seen.add(seg.a); }
+      if(!seen.has(seg.b)){ seg.b.x+=dx; seg.b.y+=dy; seen.add(seg.b); }
+    });
+  }
+
+  // --- undo/redo -------------------------------------------------------
+  // One entry = one whole user action: either the list of segments a
+  // single pointerdown..pointerup stroke added (type 'stroke'), or the
+  // full segment list a Clear wiped out (type 'clear'). Never a lone
+  // segment — a multi-segment stroke must undo as one gesture, matching
+  // how the user experiences having drawn it.
+  const undoBtn = document.getElementById('undoBtn');
+  const redoBtn = document.getElementById('redoBtn');
+  function updateHistoryButtons(){
+    undoBtn.disabled = history.length===0;
+    redoBtn.disabled = future.length===0;
+  }
+  // segments collected by the in-progress stroke (between pointerdown and
+  // pointerup); flushed into history as one entry on pointerup, discarded
+  // if the stroke never actually drew anything (a plain click with no
+  // movement, per the brief: "если он ещё не начал рисовать")
+  let strokeBuffer = [];
+  // Caps undo depth so a long drawing session — which pushes one history
+  // entry per completed stroke, indefinitely — doesn't grow `history`
+  // (and every segment array it references) without bound for the whole
+  // life of the tab. 300 steps is generous for normal sketching; the
+  // oldest entry is simply forgotten past that, same as most drawing
+  // tools' own undo limits. `future` never needs its own cap: it's
+  // cleared on every new stroke/clear and can never hold more than
+  // however many entries were just undone, which this already bounds.
+  const HISTORY_CAP = 300;
+  function pushHistory(list, entry){
+    list.push(entry);
+    if(list.length > HISTORY_CAP) list.shift();
+  }
+  function commitStroke(){
+    if(strokeBuffer.length){
+      pushHistory(history, { type:'stroke', segs: strokeBuffer });
+      future.length = 0; // any redo chain is invalidated by a new action
+      strokeBuffer = [];
+      updateHistoryButtons();
+      markInkChanged();
+    }
+  }
+  function pushClearHistory(removed){
+    if(!removed.length) return;
+    pushHistory(history, { type:'clear', segs: removed });
+    future.length = 0;
+    updateHistoryButtons();
+  }
+  function undo(){
+    if(!history.length) return;
+    const entry = history.pop();
+    if(entry.type==='stroke'){
+      // segments were appended contiguously as one stroke, so the last
+      // N entries of strokeSegments are exactly this stroke's own — pop
+      // them back off rather than searching/splicing by identity
+      strokeSegments.length -= entry.segs.length;
+    } else { // 'clear': restore exactly what was wiped
+      strokeSegments.push(...entry.segs);
+    }
+    future.push(entry);
+    markInkChanged();
+    renderAll();
+    updateHistoryButtons();
+  }
+  function redo(){
+    if(!future.length) return;
+    const entry = future.pop();
+    if(entry.type==='stroke'){
+      strokeSegments.push(...entry.segs);
+    } else { // 'clear': wipe again
+      strokeSegments.length = 0;
+    }
+    history.push(entry);
+    markInkChanged();
+    renderAll();
+    updateHistoryButtons();
+  }
+  undoBtn.addEventListener('click', undo);
+  redoBtn.addEventListener('click', redo);
+
   function draw(x,y){
     const p = {x,y};
     if(last){
       const erase = tool==='eraser';
-      strokeSegments.push({ a:last, b:p, erase });
+      const seg = { a:last, b:p, erase };
+      strokeSegments.push(seg);
+      strokeBuffer.push(seg);
+      markInkChanged();
       const r = frameRect();
       const aIn = inFrameRect(last, r), bIn = inFrameRect(p, r);
       if(aIn && bIn){
@@ -443,12 +1601,27 @@
     lastCX = e.clientX; lastCY = e.clientY; lastTarget = e.target;
     if(!drawing){
       updateHoverAffordance();
+      updateFilmstripVisibility(e.clientX, e.clientY, e.target);
+      updateLayerRailVisibility(e.clientX, e.clientY, e.target);
       return;
     }
     const p = toWorld(e.clientX, e.clientY);
     draw(p.x, p.y);
   });
-  window.addEventListener('pointerup', ()=>{ drawing=false; last=null; });
+  stage.addEventListener('pointerleave', ()=>{
+    if(filmVisible && !filmHideTimer){
+      filmHideTimer = setTimeout(()=>{ filmVisible=false; filmstripEl.classList.remove('visible'); filmHideTimer=null; }, 300);
+    }
+    if(railVisible && !railHideTimer){
+      railHideTimer = setTimeout(()=>{ railVisible=false; layerRailEl.classList.remove('visible'); railHideTimer=null; }, 300);
+    }
+  });
+  window.addEventListener('pointerup', ()=>{
+    drawing=false; last=null;
+    commitStroke();
+    renderFilmstrip();
+    renderLayerRail();
+  });
 
   document.querySelectorAll('#toolbar button[data-tool]').forEach(b=>{
     b.addEventListener('click', ()=>{
@@ -459,31 +1632,125 @@
       if(b===penBtn) recenterView();
     });
   });
+  // Clears the ACTIVE LAYER only, not the whole scene — consistent with
+  // pen/eraser/move all being scoped to whichever layer is currently
+  // selected. Other layers in this scene are untouched, so there's no
+  // need to also call renderStaticLayers() here (nothing it composites
+  // has changed) — just the active layer's own two canvases, plus both
+  // thumbnail rails that show its content.
   document.getElementById('clearBtn').addEventListener('click', ()=>{
-    strokeSegments = [];
-    fctx.clearRect(0,0,CW,CH);
-    nctx.clearRect(0,0,CW,CH);
+    const removed = strokeSegments.slice();
+    strokeSegments.length = 0;
+    pushClearHistory(removed);
+    markInkChanged();
+    renderStrokes(); // clears both canvases via the same from-scratch path everything else uses, rather than a second hand-written clearRect pair that has to be kept in sync by hand
+    renderFilmstrip();
+    renderLayerRail();
   });
 
-  function applyView(){
-    zLabel.textContent = Math.round(viewZoom*100)+'%';
+  // Move tool: press-and-hold the button ITSELF, not "select a tool, then
+  // drag on the canvas" like pen/eraser — deliberately, per how this was
+  // scoped. Pointer capture stays on the button for the whole gesture
+  // (same setPointerCapture-on-source-element + window-level move/up
+  // pattern as the resize handles below), so the cursor never has to
+  // reach the canvas and can wander anywhere on screen once the gesture
+  // has started — only the frame-to-frame movement delta is used, so the
+  // cursor is hidden for the duration (html.moving-ink in the CSS) rather
+  // than left pointing at a screen position that's disconnected from
+  // what's actually happening. frame/zoom/pan are never touched here —
+  // only this scene's own ink shifts (translateInk), which is what
+  // re-sorts each stroke black/white against the unmoving frame edge for
+  // free, via renderStrokes()'s existing in/out classification.
+  const moveBtn = document.getElementById('moveBtn');
+  moveBtn.addEventListener('pointerdown', e=>{
+    e.preventDefault();
+    // Deliberately does NOT auto-recenter and proceed — that would move
+    // the camera as a surprise side effect of a press meant to move ink,
+    // and the user would be dragging blind for however long the spring-
+    // back animation takes. Simpler and more honest to just refuse: red
+    // glow on the button itself (not the window's own on-screen rect —
+    // the whole point is this has to work even when that's nowhere the
+    // user can see), no movement, no capture — the user recenters on
+    // purpose (e.g. via the pen button, which already does this) and
+    // then tries again once they can actually see what they're moving.
+    if(!isFocused()){
+      moveBtn.classList.add('blocked');
+      const unblock = ()=>{
+        moveBtn.classList.remove('blocked');
+        window.removeEventListener('pointerup', unblock);
+        window.removeEventListener('pointercancel', unblock);
+      };
+      window.addEventListener('pointerup', unblock);
+      window.addEventListener('pointercancel', unblock);
+      return;
+    }
+    moveBtn.setPointerCapture(e.pointerId);
+    moveBtn.classList.add('active');
+    document.documentElement.classList.add('moving-ink');
+    let last = { x:e.clientX, y:e.clientY };
+    const move = ev=>{
+      const dxS = ev.clientX-last.x, dyS = ev.clientY-last.y;
+      last = { x:ev.clientX, y:ev.clientY };
+      if(!dxS && !dyS) return;
+      // live viewZoom, not frozen at gesture start — unlike the corner-
+      // resize/format-drag gestures below, this one never changes
+      // viewZoom itself, so there's no feedback loop to guard against;
+      // using the live value just keeps screen-px-moved matching
+      // screen-px-shifted even if zoom happens to change from some
+      // unrelated concurrent action mid-drag (e.g. a ctrl+wheel pinch).
+      translateInk(dxS/viewZoom, dyS/viewZoom);
+      markInkChanged();
+      renderStrokes();
+    };
+    const up = ()=>{
+      moveBtn.classList.remove('active');
+      document.documentElement.classList.remove('moving-ink');
+      renderFilmstrip();
+      renderLayerRail();
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
+
+  function applyView(coverageAlreadyChecked){
+    // the label reflects the user's own deliberate zoom relative to this
+    // shot's auto-fit baseline (always "100%" right after a switch,
+    // however big or small that shot's own window is) rather than the
+    // raw effective CSS scale — showing the raw value would make a wide
+    // shot read as e.g. "56%" even though its window looks exactly the
+    // same size on screen as every other shot's
+    zLabel.textContent = Math.round(zoomMultiplier*100)+'%';
     // translate is listed first so it moves the already-scaled element by
     // raw screen pixels — panning feels the same regardless of zoom level
     world.style.transform = `translate(${panX}px, ${panY}px) scale(${viewZoom})`;
     // panning/zooming is normally a free CSS transform (GPU-cheap, no
     // redraw) — only touch the canvas buffer when the visible area is
-    // about to outgrow it
-    if(ensureCanvasCoverage()){ updateClipPath(); renderAll(); }
+    // about to outgrow it. positionFrame() already computed this answer
+    // by the time it calls applyView() and passes it straight in (see
+    // there); it's only actually (re)computed here, with its own
+    // getBoundingClientRect() reads, for callers that haven't already
+    // checked — the wheel handler, zoom +/- clicks, and the recenter
+    // animation's own applyView() call.
+    const coverageChanged = coverageAlreadyChecked !== undefined ? coverageAlreadyChecked : ensureCanvasCoverage();
+    if(coverageChanged){ updateClipPath(); renderAll(); }
     updateFocus();
+    positionRatioTag();
     syncHandles();
+    positionFilmstrip();
+    positionLayerRail();
   }
-  document.getElementById('zIn').addEventListener('click', ()=>{ viewZoom = Math.min(viewZoom*1.15, 4); applyView(); });
-  document.getElementById('zOut').addEventListener('click', ()=>{ viewZoom = Math.max(viewZoom/1.15, 0.25); applyView(); });
+  document.getElementById('zIn').addEventListener('click', ()=>{ zoomMultiplier = Math.min(zoomMultiplier*1.15, 4); updateZoom(); applyView(); });
+  document.getElementById('zOut').addEventListener('click', ()=>{ zoomMultiplier = Math.max(zoomMultiplier/1.15, 0.25); updateZoom(); applyView(); });
   stage.addEventListener('wheel', e=>{
     e.preventDefault();
     if(e.ctrlKey){
       // trackpad pinch gesture is reported as a wheel event with ctrlKey set
-      viewZoom = Math.max(0.25, Math.min(4, viewZoom * (e.deltaY<0?1.08:0.92)));
+      zoomMultiplier = Math.max(0.25, Math.min(4, zoomMultiplier * (e.deltaY<0?1.08:0.92)));
+      updateZoom();
     } else {
       // two-finger trackpad pan / mouse-wheel scroll
       panTarget = null; // a manual pan cancels any in-flight recenter animation
@@ -493,54 +1760,41 @@
     applyView();
   }, {passive:false});
 
-  // top-right / bottom-left corners: real ZOOM — the window grows and its
-  // content grows with it (uniform, aspect-preserving), anchored at center
-  const ZOOM_CORNERS = { tr:{x:1,y:-1}, bl:{x:-1,y:1} };
-  Object.keys(ZOOM_CORNERS).forEach(corner=>{
-    const zone = document.querySelector('.handleZone.'+corner);
-    const sign = ZOOM_CORNERS[corner];
-    zone.addEventListener('pointerdown', e=>{
-      e.stopPropagation();
-      cornerDragging = true;
-      updateHoverAffordance();
-      const startX=e.clientX, startY=e.clientY;
-      const startW=frame.w, startH=frame.h;
-      const aspect = startW/startH;
-      const center = { x: frame.x+frame.w/2, y: frame.y+frame.h/2 };
-      let prevW = startW;
-      const move=(ev)=>{
-        const dx=(ev.clientX-startX)/viewZoom, dy=(ev.clientY-startY)/viewZoom;
-        const delta = (dx*sign.x + dy*sign.y)/2;
-        const newW = Math.max(120, startW + delta*2);
-        const factor = newW/prevW;
-        if(factor !== 1) scaleInsideAround(center, factor);
-        prevW = newW;
-        frame.w = newW;
-        frame.h = newW/aspect;
-        frame.x = center.x - frame.w/2;
-        frame.y = center.y - frame.h/2;
-        positionFrame();
-        renderAll();
-      };
-      const up=(ev)=>{
-        cornerDragging=false;
-        lastCX=ev.clientX; lastCY=ev.clientY;
-        updateHoverAffordance();
-        window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
-      };
-      window.addEventListener('pointermove',move);
-      window.addEventListener('pointerup',up);
-      zone.setPointerCapture(e.pointerId);
-    });
-  });
+  // Two-finger trackpad gestures over the filmstrip should browse frames
+  // (scroll the strip) instead of panning the canvas that happens to sit
+  // behind/above it. Listened on the tray itself and stopped from
+  // bubbling, so #stage's own wheel handler (which pans the world) never
+  // sees these events at all.
+  filmstripEl.addEventListener('wheel', e=>{
+    e.preventDefault();
+    e.stopPropagation();
+    if(e.ctrlKey) return; // pinch-zoom gesture: just swallow it, no zoom here
+    const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    filmTrack.scrollLeft += delta;
+  }, {passive:false});
 
-  // bottom-right corner: WINDOW-ONLY resize — grows/shrinks the viewport
-  // rectangle at a fixed content scale, so it just reveals more or less of
-  // the same underlying drawing instead of magnifying/shrinking it
-  const WINDOW_CORNERS = { br:{x:1,y:1} };
-  Object.keys(WINDOW_CORNERS).forEach(corner=>{
+  // Same idea for the layer rail, but simpler: it scrolls VERTICALLY,
+  // which is the axis a plain wheel's deltaY already drives natively for
+  // any overflow-y:auto element — no manual scrollTop math needed the
+  // way the (horizontal) filmstrip above needs scrollLeft math. Only
+  // still needed: stop the event from bubbling to #stage's own wheel
+  // handler (which pans the canvas behind the rail), and swallow pinch-
+  // zoom so it doesn't zoom the canvas while the cursor sits over here.
+  layerRailEl.addEventListener('wheel', e=>{
+    e.stopPropagation();
+    if(e.ctrlKey) e.preventDefault();
+  }, {passive:false});
+
+  // every corner except top-left resizes the shot's own window,
+  // aspect-preserving, anchored at its center. The window's ON-SCREEN
+  // size is kept auto-normalized throughout the drag (see updateZoom),
+  // so this always reads as zooming into the drawing itself — the box
+  // you see never grows or shrinks, only how much of your ink fits
+  // inside it does.
+  const RESIZE_CORNERS = { tr:{x:1,y:-1}, bl:{x:-1,y:1}, br:{x:1,y:1} };
+  Object.keys(RESIZE_CORNERS).forEach(corner=>{
     const zone = document.querySelector('.handleZone.'+corner);
-    const sign = WINDOW_CORNERS[corner];
+    const sign = RESIZE_CORNERS[corner];
     zone.addEventListener('pointerdown', e=>{
       e.stopPropagation();
       cornerDragging = true;
@@ -549,22 +1803,31 @@
       const startW=frame.w, startH=frame.h;
       const aspect = startW/startH;
       const center = { x: frame.x+frame.w/2, y: frame.y+frame.h/2 };
+      // frozen for this whole gesture: converting the mouse's screen
+      // delta to world units must use a fixed reference, never the live
+      // viewZoom — dragging changes frame.w/h, which (via updateZoom)
+      // changes viewZoom, so reading the live value here would feed back
+      // into itself and make the drag spiral out of control.
+      const startZoom = viewZoom;
       const move=(ev)=>{
-        const dx=(ev.clientX-startX)/viewZoom, dy=(ev.clientY-startY)/viewZoom;
+        const dx=(ev.clientX-startX)/startZoom, dy=(ev.clientY-startY)/startZoom;
         const delta = (dx*sign.x + dy*sign.y)/2;
         const newW = Math.max(120, startW + delta*2);
         frame.w = newW;
         frame.h = newW/aspect;
         frame.x = center.x - frame.w/2;
         frame.y = center.y - frame.h/2;
+        updateZoom();
         positionFrame();
-        renderAll();
+        renderStrokes();
+        scheduleHeavyRerender();
       };
       const up=(ev)=>{
         cornerDragging=false;
         lastCX=ev.clientX; lastCY=ev.clientY;
         updateHoverAffordance();
         window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
+        renderAll(); // guarantee one full, untimed pass — the gesture may have ended on a throttled/coalesced frame
       };
       window.addEventListener('pointermove',move);
       window.addEventListener('pointerup',up);
@@ -584,14 +1847,22 @@
     const center = { x: frame.x+frame.w/2, y: frame.y+frame.h/2 };
     elastic.center = center;
     elastic.active = true;
+    ensureTickRunning();
     ratioTag.style.opacity = '1';
     // fix the area at the size the frame had when the gesture started —
     // this way scale is determined only by which preset is picked, not
     // by how far the cursor is dragged; continuing to drag within the
     // same preset no longer keeps inflating the size
     const area = frame.w * frame.h;
+    // frozen reference for interpreting the cursor during this whole
+    // gesture — see the resize-corner handler above for why this can't
+    // read the live viewZoom once the frame (and so viewZoom) starts
+    // changing under the cursor
+    const startZoom = viewZoom;
+    const wr = world.getBoundingClientRect();
+    const toWorldFrozen = (clientX, clientY) => ({ x:(clientX-wr.left)/startZoom, y:(clientY-wr.top)/startZoom });
     const move=(ev)=>{
-      const p = toWorld(ev.clientX, ev.clientY);
+      const p = toWorldFrozen(ev.clientX, ev.clientY);
       // distance from center, mirrored to both sides -> used only to
       // detect direction/ratio, not to set absolute size
       let rawW = (center.x - p.x)*2, rawH = (center.y - p.y)*2;
@@ -603,7 +1874,7 @@
       let targetH = targetW/ratio;
       targetW = Math.max(90, targetW);
       targetH = Math.max(60, targetH);
-      elastic.targetW = targetW; elastic.targetH = targetH; elastic.label = preset.label;
+      elastic.targetW = targetW; elastic.targetH = targetH;
       ratioTag.textContent = preset.label;
     };
     const up=(ev)=>{
@@ -612,11 +1883,14 @@
       updateHoverAffordance();
       window.removeEventListener('pointermove',move);
       window.removeEventListener('pointerup',up);
-      setTimeout(()=>{ if(!elastic.settling){} }, 0);
-      // fade the label out once it's basically settled
+      // fade the label out once it's basically settled (or stop polling
+      // outright if a scene switch already cancelled this gesture — after
+      // that, `frame` may refer to a different scene entirely, so this
+      // stale target should never be compared against it again)
       const check = setInterval(()=>{
-        if(Math.abs(frame.w-elastic.targetW)<0.5 && Math.abs(frame.h-elastic.targetH)<0.5){
+        if(!elastic.active || (Math.abs(frame.w-elastic.targetW)<0.5 && Math.abs(frame.h-elastic.targetH)<0.5)){
           ratioTag.style.opacity='0'; elastic.active=false; clearInterval(check);
+          renderAll(); // guarantee one full, untimed pass — elasticTick() throttles the expensive tier while settling
         }
       }, 120);
     };
@@ -626,15 +1900,29 @@
   });
 
   // continuous rubber-band easing loop — shared by the format handle and
-  // by "click to recenter" (reusing one animation loop instead of two)
+  // by "click to recenter" (reusing one animation loop instead of two).
+  // Only runs while there's actually something to animate: used to call
+  // requestAnimationFrame(elasticTick) unconditionally forever, which
+  // meant a rAF callback firing ~60x/sec for the entire life of the tab
+  // even when totally idle (the vast majority of a session). Harmless on
+  // its own, but there's no reason to pay even that much when idle — see
+  // ensureTickRunning() below, called from the two places that actually
+  // start an animation (elastic.active=true and panTarget being set).
+  let tickRAF = null;
+  function ensureTickRunning(){
+    if(!tickRAF) tickRAF = requestAnimationFrame(elasticTick);
+  }
   function elasticTick(){
+    tickRAF = null;
     if(elastic.active){
       frame.w += (elastic.targetW - frame.w)*0.16;
       frame.h += (elastic.targetH - frame.h)*0.16;
       frame.x = elastic.center.x - frame.w/2;
       frame.y = elastic.center.y - frame.h/2;
+      updateZoom();
       positionFrame();
-      renderAll();
+      renderStrokes();
+      scheduleHeavyRerender();
     }
     if(panTarget){
       // time-based ease-out over a fixed duration: deceleration is spread
@@ -647,12 +1935,22 @@
       if(t>=1) panTarget = null;
       applyView();
     }
-    requestAnimationFrame(elasticTick);
+    if(elastic.active || panTarget) tickRAF = requestAnimationFrame(elasticTick);
   }
-  elasticTick();
 
-  window.addEventListener('resize', resize);
+  // Many browsers fire 'resize' repeatedly while the user is actively
+  // dragging the OS window's edge, not just once at the end. resize()
+  // now allocates a CAPPED (not multi-gigabyte) canvas buffer, but it's
+  // still real allocation + a full renderAll() — no reason to pay that
+  // cost on every intermediate frame of the drag instead of once after
+  // the user actually settles on a size.
+  let resizeDebounceTimer = null;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(resizeDebounceTimer);
+    resizeDebounceTimer = setTimeout(resize, 150);
+  });
   resize();
+  updateHistoryButtons();
 })();
 </script>
 </body>
