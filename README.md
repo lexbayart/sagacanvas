@@ -12,25 +12,27 @@ Most storyboarding tools lock you into a grid of fixed frames, a timeline, or a 
 
 You get an infinite dark canvas and a single drawing window — a frame that behaves like a physical piece of film stock lying on a table. Draw inside it and your strokes appear in black. Draw outside and they turn white, waiting in the margins. Resize the window and previously-hidden strokes slide into view, turning black as the frame edge sweeps over them. Nothing is ever lost. The drawing exists on the infinite surface; the frame is just a viewport you move and reshape.
 
-This is the core interaction loop of SagaCanvas: draw freely on an unbounded surface, then shape the frame around what you've drawn — or pan away and draw somewhere else entirely. No layers panel. No undo stack. No preset layout. Just pen, eraser, and a window you can stretch, zoom, and reposition however you like.
+On top of that core, this build adds the structure every real storyboard needs without taking the freedom away: **unlimited layers per scene**, a **filmstrip of scenes** where each shot keeps its own framing and camera, and **undo/redo**. Your shots have names and a sequence when you want them — and the moment the sequence gets in your way, you can ignore it and just draw.
 
-It's early — this is version 0.2, the very beginning. The core interaction with the frame is worked out. What comes next is where the real tool takes shape.
+It's still early and in active development. The core frame interaction is worked out; scenes, layers and history are now live; what comes next is saving your work and turning the storyboard into an actual sequence.
 
 ---
 
-## ✨ Current features
+## ✨ Features
 
 - **Infinite canvas** — draw anywhere; the surface grows as you pan
-- **Frame as viewport** — a resizable drawing window on an unbounded surface; ink inside is visible (black), ink outside is hidden (white)
-- **Real-time ink classification** — strokes dynamically turn black or white as the frame edge sweeps over them during resize
+- **Frame as viewport** — an infinitely visible drawing window on an unbounded surface; ink inside is black, ink outside is white, nothing is ever deleted
+- **Scenes / storyboard** — multiple shots, each with its own frame position, size, format and camera; the bottom filmstrip adds scenes (after or before) and switches between them
+- **Layers** — unlimited layers per scene; add above or below, switch from the right-hand rail; erasing is layer-safe and never eats into another layer's ink
+- **Undo / Redo** — full history per layer; each step undoes one stroke or one clear
+- **Move tool** — press-and-hold the move button and drag anywhere: the drawing itself shifts under your cursor, not just the camera
 - **Pen and eraser** — two tools, switchable from the toolbar
 - **Clear** — wipe the canvas and start fresh
-- **Camera pan** — scroll or two-finger trackpad drag to move across the infinite surface
-- **Camera zoom** — pinch gesture or +/− buttons (0.25× to 4×)
-- **Frame resize** — bottom-right corner grows/shrinks the viewport without scaling content; top-right and bottom-left corners zoom the content inside the frame
-- **Format snapping** — top-left corner snaps the frame to standard cinematic aspect ratios (2.39:1, 2:1, 1.85:1, 16:9, 1:1, 4:3, 9:16) with elastic rubber-band animation
+- **Camera pan & zoom** — scroll, two-finger trackpad drag, pinch, or +/− buttons (0.25× to 4×)
+- **Frame corner handles** — bottom-right resizes the window; top-right and bottom-left zoom the content inside the frame; top-left snaps the format
+- **Format snapping** — 2.39:1, 2.00:1, 1.85:1, 16:9, 1:1, 4:3, 9:16 with elastic rubber-band animation
 - **Focus ring** — when the frame drifts off-center, a highlight ring appears; click it to smoothly dock the frame back to the center of the viewport
-- **Locate button** — when the frame is completely off-screen, the pen button glows to signal you can click it to find the frame again
+- **Locate button** — when the frame goes fully off-screen, the pen button glows to signal you can click it to find the frame again
 
 ---
 
@@ -46,25 +48,21 @@ Or download `index.html` from this repo and open it locally — fully standalone
 
 ## 📖 Documentation
 
-- [**Complete User Guide**](docs/GUIDE.md) — tools, interactions, all features explained
+- [**Complete User Guide**](docs/GUIDE.md) — tools, layers, scenes, undo/redo, all interactions explained
 
 ---
 
-## 🛠️ Tech
+## 🔮 Status & what's being built
 
-Vanilla JS · HTML5 Canvas · Zero dependencies · Zero build step · Single HTML file
+The earlier release (v0.2) was a single unlayered frame with no undo. This build is the biggest jump yet: scenes, layers, undo/redo and a grain-panning move tool are already live.
 
----
+Still in progress:
 
-## 🔮 Roadmap
-
-What's being built next:
-
-- **Scene storyboarding** — switching between frames, drawing full storyboards for individual scenes
-- **Director's view** — a top-down scene planning mode where you place cameras, characters, and visual annotations as comments on the frames you draw
+- **Persistence & export** — right now everything lives in RAM; reloading the page loses your shots, and there's no PNG export yet
+- **Director's view** — a top-down scene planning mode where you place lights, cameras, characters and visual annotations as comments on the frames
 - **References** — drop in GIFs, images, and script pages alongside your drawings
 - **Audio** — attach sound references to frames and scenes
-- **Dynamic timeline** — arrange your storyboards into a living timeline for the entire film (secret work in progress)
+- **Dynamic timeline** — arrange your storyboards into a living sequence for the entire film (secret work in progress)
 
 The philosophy stays the same: the tool follows your process, not the other way around.
 
@@ -77,6 +75,12 @@ Found a bug or have an idea? Reach out:
 
 - **Telegram:** [@lexbay](https://t.me/lexbay)
 - **GitHub Issues:** [Open an issue](https://github.com/lexbayart/sagacanvas/issues)
+
+---
+
+## 🛠️ Tech
+
+Vanilla JS · HTML5 Canvas · Zero dependencies · Zero build step · Single HTML file
 
 ---
 
