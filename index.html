@@ -7,8 +7,29 @@
   html,body{margin:0;height:100%;background:#050505;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
   #stage{position:relative;width:100vw;height:100vh;background:radial-gradient(ellipse at 50% 42%, #32353a 0%, #24262a 32%, #16181c 62%, #0d0f11 100%);overflow:hidden;touch-action:none;}
   #world{position:absolute;transform-origin:50% 50%;}
-  #ghost,#front,#frontBelow,#frontAbove,#notes,#notesBelow,#notesAbove{position:absolute;left:0;top:0;}
+  /* pointer-events:none is required, not cosmetic: these 7 canvases are
+     resized by ensureCanvasCoverage() to blanket the ENTIRE visible
+     viewport (+600px pad), and a <canvas> is hit-testable across its
+     whole box even where nothing is drawn (transparent pixels still
+     catch clicks). #refLayer sits BELOW all of them in #world (see its
+     own comment), so without this, every one of these canvases silently
+     eats the pointerdown before it can ever reach a .refItem underneath
+     -- the reference is visible (transparency doesn't hide it) but
+     permanently unclickable. Safe to disable: nothing anywhere attaches
+     listeners to these elements directly or checks e.target against
+     them (grep confirms it -- only #stage's delegated handlers matter,
+     and those key off coordinates/app state, not which canvas got hit),
+     so stage's own pointerdown/move/up keep firing exactly as before;
+     only the browser's hit-test target changes, letting it fall through
+     to whatever's actually underneath (a .refItem, or #world itself). */
+  #ghost,#front,#frontBelow,#frontAbove,#notes,#notesBelow,#notesAbove{position:absolute;left:0;top:0;pointer-events:none;}
   .frame{box-sizing:border-box;position:absolute;border:1px solid rgba(255,255,255,.65);box-shadow:0 8px 60px 12px rgba(0,0,0,.5);background:#f4f2ee;border-radius:var(--corner-r);}
+  #thirdsGrid{position:absolute;inset:0;pointer-events:none;opacity:0;transition:opacity .15s ease;}
+  #thirdsGrid.visible{opacity:1;}
+  #thirdsGrid::before,#thirdsGrid::after{content:'';position:absolute;background:#fff;mix-blend-mode:difference;}
+  #thirdsGrid::before{left:33.333%;top:0;width:1px;height:100%;}
+  #thirdsGrid::after{left:66.666%;top:0;width:1px;height:100%;}
+  .hline{position:absolute;left:0;width:100%;height:1px;background:#fff;mix-blend-mode:difference;}
   /* lives OUTSIDE #world (not scaled with it) so its thickness stays
      constant in screen pixels no matter how far the camera has zoomed.
      Its border-radius is set from JS (screen px = world radius * viewZoom)
@@ -22,6 +43,26 @@
   .handle{width:11px;height:11px;border-radius:3px;background:rgba(255,255,255,.9);border:1px solid rgba(0,0,0,.35);opacity:0;transition:opacity .12s ease;}
   .handleZone:hover .handle{opacity:1;}
   .ratioTag{position:absolute;color:rgba(255,255,255,.7);font-size:11px;background:rgba(0,0,0,.55);padding:3px 7px;border-radius:5px;opacity:0;transition:opacity .12s ease;pointer-events:none;}
+  /* same fixed-screen-size trick as .handleZone (lives outside #world),
+     just a separate class — see the HTML comment above these divs for why */
+  .imgHandleZone{position:absolute;width:44px;height:44px;display:none;align-items:center;justify-content:center;margin-left:-22px;margin-top:-22px;touch-action:none;}
+  .imgHandleZone.tl,.imgHandleZone.br{cursor:nwse-resize;}
+  .imgHandleZone.tr,.imgHandleZone.bl{cursor:nesw-resize;}
+  .imgHandle{width:11px;height:11px;border-radius:3px;background:rgba(150,255,175,.95);border:1px solid rgba(0,0,0,.35);}
+  .refHandleZone{position:absolute;width:44px;height:44px;display:none;align-items:center;justify-content:center;margin-left:-22px;margin-top:-22px;touch-action:none;}
+  .refHandleZone.tl,.refHandleZone.br{cursor:nwse-resize;}
+  .refHandleZone.tr,.refHandleZone.bl{cursor:nesw-resize;}
+  .pictureDeleteBtn{position:absolute;display:none;align-items:center;justify-content:center;width:28px;height:28px;margin-left:-14px;margin-top:-14px;border-radius:50%;border:1px solid rgba(0,0,0,.35);background:rgba(255,90,90,.92);color:#fff;font-size:14px;line-height:1;cursor:pointer;touch-action:none;box-shadow:0 2px 8px rgba(0,0,0,.35);}
+  .pictureDeleteBtn:hover{background:rgba(255,60,60,.98);}
+  /* refLayer lives INSIDE #world (first child, so it paints below every
+     ink canvas and below frameBox's own opaque background) — its children
+     are positioned in raw world px, same convention as frameBox itself,
+     so they pan/zoom for free via #world's own CSS transform and need no
+     manual per-frame repositioning of their own. */
+  #refLayer{position:absolute;left:0;top:0;}
+  .refItem{position:absolute;box-sizing:border-box;cursor:grab;box-shadow:0 8px 30px 6px rgba(0,0,0,.45);border-radius:2px;touch-action:none;}
+  .refItem.dragging{cursor:grabbing;}
+  .refItem.selected{outline:2px solid rgba(150,255,175,.95);outline-offset:2px;}
   /* left edge, sitting a bit above dead-center: top edge = 50% minus the
      bar's own full rendered height (276px = 6 buttons*38 + 5 gaps*6 +
      padding 8*2 + border 1*2*2), which works out to the bar's CENTER
@@ -80,6 +121,50 @@
   .filmThumb.active:hover{border-color:rgba(150,255,175,.9);}
   .filmAdd{box-sizing:border-box;flex:none;display:flex;align-items:center;justify-content:center;border-radius:6px;border:1px dashed rgba(255,255,255,.3);color:rgba(255,255,255,.5);cursor:pointer;font-size:20px;transition:color .12s ease, border-color .12s ease;}
   .filmAdd:hover{color:rgba(255,255,255,.9);border-color:rgba(255,255,255,.55);}
+  /* ordinal label painted straight onto the thumbnail -- no background
+     chip, so it reads as a caption baked into the frame rather than one
+     more UI control sitting on top of it. Needs its own wrapper because
+     a <canvas>'s DOM children never paint over its drawn pixels, so the
+     label can't just live inside .filmThumb itself. flex:none/
+     display:block moves to the wrapper since IT is the real flex item
+     now; .filmThumb keeps its box-sizing/shadow/border but sits inside
+     the wrapper instead of being it.
+     Contrast comes from mix-blend-mode:difference on a solid #fff, not
+     a shadow or plate: difference inverts per-pixel against whatever's
+     directly behind it -- renders dark over the thumbnail's light cream
+     base, white over dark ink/photos -- so it stays legible over ANY
+     thumbnail content automatically. Same trick Photoshop uses for
+     guides/rulers that have to read over arbitrary image colors. The
+     canvas beneath is always fully opaque across the whole tile (base
+     fillRect before any ink), so there's always a real color directly
+     behind the label to invert against. Needs a fully opaque foreground
+     (no alpha) -- any transparency softens the invert back toward a
+     half-blended, lower-contrast result. */
+  .filmThumbWrap{position:relative;flex:none;display:block;}
+  .filmThumbNum{position:absolute;left:5px;top:3px;color:#fff;mix-blend-mode:difference;font-size:12px;font-weight:400;line-height:1;pointer-events:none;user-select:none;}
+  /* press-and-hold reorder (see beginFilmThumbGesture in the script): the
+     tile being held renders as this empty target slot instead of its
+     thumbnail -- same dashed-empty language as .filmAdd above, so it
+     reads as "nothing real here (yet)" using a visual idiom the app
+     already teaches via the add buttons. Deliberately NOT the mint
+     accent (.filmThumb.active etc.) -- that color already means "this is
+     the open scene", and reusing it here would read as a second,
+     conflicting meaning. */
+  .filmDropSlot{box-sizing:border-box;border-radius:6px;border:1px dashed rgba(255,255,255,.3);background:rgba(255,255,255,.05);}
+  /* the ghost itself: a floating copy of whatever's being dragged, glued
+     to the pointer. Must NOT live inside #filmstrip -- that element has
+     its own transform (see its rule above), and a transformed ancestor
+     becomes the containing block for position:fixed descendants, which
+     would confine the ghost to #filmstrip's own box instead of letting
+     it roam the full viewport as the pointer does. Reuses .filmThumbWrap
+     for the box model, then this ID rule overrides just position/
+     visibility -- an ID beats a class on specificity alone, so this
+     wins regardless of the two rules' order in the sheet. left/top are
+     driven straight off clientX/Y every pointermove with no transition:
+     any easing here would read as lag behind the actual finger/cursor. */
+  #filmDragGhost{position:fixed;left:0;top:0;display:none;pointer-events:none;z-index:10;}
+  #filmDragGhost .filmThumb{box-shadow:0 14px 32px rgba(0,0,0,.6);transform:scale(1.04);}
+  html.film-dragging, html.film-dragging *{cursor:grabbing!important;}
   /* layer rail: same appear-on-hover / scroll-with-fade mechanic as the
      filmstrip above, rotated 90° — a vertical column of circles to the
      RIGHT of the frame instead of a horizontal row of aspect-matched
@@ -89,27 +174,55 @@
      to fit that fixed shape. */
   #layerRail{position:absolute;left:0;top:0;display:flex;flex-direction:column;justify-content:center;opacity:0;transform:translateX(10px);pointer-events:none;transition:opacity .15s ease, transform .15s ease;z-index:5;}
   #layerRail.visible{opacity:1;transform:translateX(0);pointer-events:auto;}
-  #layerTrack{display:flex;flex-direction:column;gap:8px;max-height:100%;overflow-y:auto;background:transparent;
+  #layerTrack{display:flex;flex-direction:column;gap:8px;max-height:100%;overflow-y:auto;background:transparent;padding:3px;
     -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 var(--fade,0px), #000 calc(100% - var(--fade,0px)), transparent 100%);
     mask-image:linear-gradient(to bottom, transparent 0, #000 var(--fade,0px), #000 calc(100% - var(--fade,0px)), transparent 100%);
     scrollbar-width:none;}
   #layerTrack::-webkit-scrollbar{display:none;}
-  .layerThumb{box-sizing:border-box;border-radius:50%;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);border:2px solid transparent;display:block;flex:none;}
-  .layerThumb.active{border-color:rgba(150,255,175,.9);}
+  .layerThumb{box-sizing:border-box;border-radius:50%;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);border:none;display:block;flex:none;}
+  .layerThumb.active{border-color:transparent;}
   .layerThumb:hover{border-color:rgba(255,255,255,.4);}
-  .layerThumb.active:hover{border-color:rgba(150,255,175,.9);}
+  .layerThumb.active:hover{border-color:transparent;}
   .layerAdd{box-sizing:border-box;flex:none;display:flex;align-items:center;justify-content:center;border-radius:50%;border:1px dashed rgba(255,255,255,.3);color:rgba(255,255,255,.5);cursor:pointer;font-size:18px;transition:color .12s ease, border-color .12s ease;}
   .layerAdd:hover{color:rgba(255,255,255,.9);border-color:rgba(255,255,255,.55);}
+  /* layer eye: overlay on the ACTIVE layer's circle (built in
+     renderLayerRail). Wrapper makes the circle a positioned box so the
+     eye/ring/pct can sit on top of the canvas. */
+  .layerThumbWrap{position:relative;flex:none;display:block;}
+  .layerEye{position:absolute;left:2px;top:2px;width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.92);background:rgba(0,0,0,.5);border-radius:50%;cursor:pointer;touch-action:none;z-index:2;box-shadow:0 1px 4px rgba(0,0,0,.45);}
+  .layerEye svg{display:block;}
+  .layerEye .eyeClosed{display:none;}
+  .layerEye.off .eyeOpen{display:none;}
+  .layerEye.off .eyeClosed{display:block;}
+  .layerEyePct{position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:#fff;mix-blend-mode:difference;font-size:11px;font-weight:600;line-height:1;pointer-events:none;user-select:none;z-index:2;}
+  .layerEyePct.show{display:flex;}
+  /* ring OVERLAYS the native green border on .layerThumb.active exactly:
+     same box (inset:0 == thumb box), same stroke color/width, so the
+     dashed/solid arc reads as the border itself turning dashed — no second
+     contour ring anywhere. r=48.5/100 puts the 2px stroke on the border
+     zone: inner 30.8px, outer 32.8px from center (border-box half 32.8). */
+  .layerEyeRing{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1;overflow:visible;}
+  /* rule-of-thirds grid toggle: same appear-on-hover / slide mechanic as
+     the filmstrip below and the layer rail to the right, mirrored to the
+     TOP edge of the drawing window. Lives OUTSIDE #world (not scaled);
+     positioned by positionThirdsPanel(). The PANEL follows the cursor;
+     the grid itself (#thirdsGrid) is controlled ONLY by the button. */
+  #thirdsPanel{position:absolute;left:0;top:0;display:flex;justify-content:center;gap:6px;opacity:0;transform:translateY(10px);pointer-events:none;transition:opacity .15s ease, transform .15s ease;z-index:5;}
+  #thirdsPanel.visible{opacity:1;transform:translateY(0);pointer-events:auto;}
+  #thirdsBtn,#thirdsSaveBtn{width:38px;height:38px;border-radius:9px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:rgba(255,255,255,.55);cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;transition:background .15s ease, color .15s ease;}
+  #thirdsBtn:hover,#thirdsSaveBtn:hover{background:rgba(255,255,255,.14);color:#fff;}
+  #thirdsBtn.active{background:rgba(255,255,255,.14);color:#fff;}
 </style>
 </head>
 <body>
 <div id="stage">
   <div id="world">
+    <div id="refLayer"></div>
     <canvas id="ghost"></canvas>
     <canvas id="notesBelow"></canvas>
     <canvas id="notes"></canvas>
     <canvas id="notesAbove"></canvas>
-    <div class="frame" id="frameBox"></div>
+    <div class="frame" id="frameBox"><div id="thirdsGrid"><div class="hline" style="top:33.333%"></div><div class="hline" style="top:66.666%"></div></div></div>
     <canvas id="frontBelow"></canvas>
     <canvas id="front"></canvas>
     <canvas id="frontAbove"></canvas>
@@ -121,8 +234,62 @@
   <div class="handleZone tr" data-corner="tr"><div class="handle"></div></div>
   <div class="handleZone bl" data-corner="bl"><div class="handle"></div></div>
   <div class="handleZone br" data-corner="br"><div class="handle"></div></div>
+  <!-- Handles for the ACTIVE IMAGE LAYER's own rect (not the frame) — a
+       separate class (imgHandleZone, not handleZone) so querySelector(
+       '.handleZone.'+corner) elsewhere keeps resolving to exactly the
+       frame's own 4 handles, never these. Hidden by default (display:none
+       in CSS); shown/positioned by syncImageHandles() only while the
+       active layer's type is 'image'. Green dot (vs the frame handles'
+       white) is a deliberate, cheap visual cue that these move/scale the
+       PICTURE, not the shot's own window. -->
+  <div id="thirdsPanel"><button id="thirdsBtn" title="Сетка третей"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><line x1="6" y1="0" x2="6" y2="18"/><line x1="12" y1="0" x2="12" y2="18"/><line x1="0" y1="6" x2="18" y2="6"/><line x1="0" y1="12" x2="18" y2="12"/></svg></button><button id="thirdsSaveBtn" title="Сохранить кадр"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M9 2v9"/><path d="M5 7l4 4 4-4"/><path d="M3 14h12"/></svg></button></div>
+  <div class="imgHandleZone tl" data-corner="tl"><div class="imgHandle"></div></div>
+  <div class="imgHandleZone tr" data-corner="tr"><div class="imgHandle"></div></div>
+  <div class="imgHandleZone bl" data-corner="bl"><div class="imgHandle"></div></div>
+  <div class="imgHandleZone br" data-corner="br"><div class="imgHandle"></div></div>
+  <!-- Same idea again, one level further out: handles for the SELECTED
+       REFERENCE on the open canvas (not the frame, not an active image
+       layer). A third, separate class so none of the three handle sets
+       ever collide in a querySelector -- see syncRefHandles(). -->
+  <div class="refHandleZone tl" data-corner="tl"><div class="imgHandle"></div></div>
+  <div class="refHandleZone tr" data-corner="tr"><div class="imgHandle"></div></div>
+  <div class="refHandleZone bl" data-corner="bl"><div class="imgHandle"></div></div>
+  <div class="refHandleZone br" data-corner="br"><div class="imgHandle"></div></div>
+  <!-- Delete buttons: one for the active IMAGE LAYER, one for the
+       SELECTED REFERENCE. Same fixed-screen-size-outside-#world trick as
+       every other handle here; positioned near (not on top of) the tr
+       resize corner by syncImgDeleteBtn/syncRefDeleteBtn so it's a
+       clearly separate tap target. Deliberately a single explicit tap,
+       no confirmation dialog -- nothing else in this app asks "are you
+       sure", and removing one layer/reference is not destructive enough
+       to be the one exception. -->
+  <button id="imgDeleteBtn" class="pictureDeleteBtn" title="Удалить эту картинку">✕</button>
+  <button id="refDeleteBtn" class="pictureDeleteBtn" title="Удалить референс">✕</button>
 
   <div id="toolbar">
+    <!-- A real third data-tool now (started out as a pure hint button,
+         but that's confusing -- clicking a "tool" that never highlights
+         reads as broken, not as "you don't need me"). Joins the pen/
+         eraser active-toggle group for free via the generic
+         button[data-tool] querySelectorAll below.
+         Selecting a reference or dragging an active image layer already
+         works via a direct click NO MATTER which tool is active -- this
+         button doesn't gate that and never has. What it actually does,
+         wired in two places:
+         1) the toolbar click handler skips ensureDrawableActiveLayer()
+            for it specifically, since that call jumps you OFF an active
+            image layer onto a fresh blank one -- exactly the layer this
+            tool exists to let you grab, so running it here would defeat
+            the point before your next click even lands.
+         2) stage's pointerdown bails out right before the drawing
+            fallback when this tool is active, so a click on empty canvas
+            does nothing instead of leaving a stray ink dot -- pen/eraser
+            still fall through to draw() as before. -->
+    <button data-tool="cursor" id="cursorBtn" title="Курсор — клик по картинке выделяет её; рисование пока отключено">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 3L5 16L8 13.5L11 19L13 18L10 12.5L16 12.5Z"/>
+      </svg>
+    </button>
     <button data-tool="pen" class="active" title="Перо">✏</button>
     <button data-tool="eraser" title="Ластик">⌫</button>
     <button id="moveBtn" title="Сдвинуть рисунок — зажать и тянуть в любую сторону">
@@ -157,6 +324,14 @@
   </div>
 
   <div id="filmstrip"><div id="filmTrack"></div></div>
+  <!-- Floating copy of whichever thumbnail is currently being
+       press-and-held, shown/positioned by beginFilmThumbGesture() in
+       the script below. Reuses .filmThumbWrap/.filmThumb/.filmThumbNum
+       so it looks exactly like a real tile; #filmDragGhost's own rule
+       (CSS) is what turns it fixed/floating/hidden-by-default -- see
+       that rule for why it has to live out here rather than inside
+       #filmstrip itself. -->
+  <div id="filmDragGhost" class="filmThumbWrap"><canvas class="filmThumb"></canvas><div class="filmThumbNum"></div></div>
 </div>
 
 <script>
@@ -204,6 +379,31 @@
   const groupScratchN = document.createElement('canvas');
   const gsnCtx = groupScratchN.getContext('2d');
   const frameBox = document.getElementById('frameBox');
+  // frameBox's/stage's on-screen rect gets asked for by ~a dozen call
+  // sites (focus/hover tracking, handles, ratio tag, filmstrip/rail
+  // positioning and visibility) -- several of them from INDEPENDENT
+  // pointermove/pointerdown handlers, not just from inside an applyView()
+  // cycle. getBoundingClientRect() forces the browser to (re)compute
+  // layout on demand every single time it's called, whether or not
+  // anything actually moved. These two memoize it instead: valid for as
+  // long as nothing that could change frameBox's SCREEN position has
+  // happened since -- its own left/top/width/height, #world's transform,
+  // or #world's own left/top -- see the explicit invalidation at each of
+  // those three write sites (positionFrame, applyView, resize). The
+  // common case this targets is a hover-only pointermove between camera
+  // moves: no camera motion happened, so the last computed rect is still
+  // exactly correct, and this skips re-asking the browser to lay it out
+  // again just to get the same answer back.
+  let frameBoxRectCache = null, stageRectCache = null;
+  const thirdsGridEl = document.getElementById('thirdsGrid');
+  function getFrameBoxRect(){
+    if(!frameBoxRectCache) frameBoxRectCache = frameBox.getBoundingClientRect();
+    return frameBoxRectCache;
+  }
+  function getStageRect(){
+    if(!stageRectCache) stageRectCache = stage.getBoundingClientRect();
+    return stageRectCache;
+  }
   const focusRing = document.getElementById('focusRing');
   const zLabel = document.getElementById('zLabel');
   const ratioTag = document.getElementById('ratioTag');
@@ -293,10 +493,8 @@
   // circles in the layer rail (renderLayerRail() below) are a FIXED
   // diameter rather than reshaped per frame height like filmstrip tiles
   // are — see LAYER_D's own definition inside renderLayerRail() for where
-  // that number comes from and why. LAYER_D_MIN below is the floor for
-  // the one case a fixed size can't handle on its own (a frame too short
-  // to fit the normal count at full size) — see the shrink branch there.
-  const LAYER_D_MIN = 32;
+  // that number comes from and why. When there isn't enough height for
+  // them, the rail's overflow-y:auto scrolls instead of shrinking.
   function fitZoomFor(w, h){
     const base = FIT_REF / Math.max(w, h);
     // W/H aren't set until resize() runs (right at the very end of
@@ -378,13 +576,49 @@
   // — see commitStroke/pushClearHistory below.
   let scenes = [{
     frame: frame, zoomMultiplier: zoomMultiplier, panX: panX, panY: panY,
-    layers: [{ segments: [], history: [], future: [], inkVersion: 0 }],
+    layers: [{ segments: [], history: [], future: [], inkVersion: 0, opacity: 1 }],
     activeLayer: 0, inkVersion: 0
   }];
   let activeScene = 0;
   let strokeSegments = scenes[activeScene].layers[0].segments;
   let history = scenes[activeScene].layers[0].history;
   let future = scenes[activeScene].layers[0].future;
+
+  // --- reference images -------------------------------------------------
+  // References live on the gray canvas itself (#world), NOT inside any
+  // one scene — same reasoning as the canvas/background being one shared
+  // surface the whole project sits on, rather than a per-scene thing (see
+  // refLayer in the markup). A flat array is enough: each entry owns its
+  // own DOM element (.el, a pre-rendered <canvas> — see renderRefElement)
+  // positioned in raw world px, which rides along with #world's transform
+  // for free and needs no per-frame JS repositioning of its own.
+  let references = [];
+  let refIdCounter = 1;
+  let selectedRef = null;
+  const refLayerEl = document.getElementById('refLayer');
+  // true for the whole duration of an image-layer move/scale gesture, or
+  // a reference drag — folded into gestureInProgress() below so a scene/
+  // layer switch (or a second concurrent touch starting to draw) can't
+  // land mid-gesture and tear the layer array out from under a drag that
+  // still thinks it owns a specific layer/reference object.
+  let imageDragging = false, refDragging = false;
+  let eyeDragging = false;
+  // the 4 new corner handles for the ACTIVE IMAGE LAYER's own rect (see
+  // the HTML comment above them) -- keyed by corner for easy lookup from
+  // syncImageHandles()/the resize-gesture wiring near the bottom of this
+  // file.
+  const imgHandleEls = {
+    tl: document.querySelector('.imgHandleZone.tl'),
+    tr: document.querySelector('.imgHandleZone.tr'),
+    bl: document.querySelector('.imgHandleZone.bl'),
+    br: document.querySelector('.imgHandleZone.br'),
+  };
+  const refHandleEls = {
+    tl: document.querySelector('.refHandleZone.tl'),
+    tr: document.querySelector('.refHandleZone.tr'),
+    bl: document.querySelector('.refHandleZone.bl'),
+    br: document.querySelector('.refHandleZone.br'),
+  };
 
   // Writes the live camera/window state back into whichever scene
   // currently owns it. `frame` is always a direct reference to the active
@@ -419,6 +653,7 @@
     strokeSegments = layer.segments;
     history = layer.history; future = layer.future;
     updateHistoryButtons();
+    updateActiveLayerUI();
   }
   // Starting state for a brand-new scene: the SAME window SHAPE (aspect
   // ratio/format) as whatever's currently active, so a new panel matches
@@ -446,7 +681,7 @@
     return {
       frame: { x: worldW/2-w/2, y: worldH/2-h/2, w, h },
       zoomMultiplier: 1, panX: 0, panY: -effectiveBias(),
-      layers: [{ segments: [], history: [], future: [], inkVersion: 0 }],
+      layers: [{ segments: [], history: [], future: [], inkVersion: 0, opacity: 1 }],
       activeLayer: 0, inkVersion: 0
     };
   }
@@ -466,7 +701,23 @@
   // after the gesture ends is indistinguishable from any other double
   // click, so there's nothing useful to queue.
   function gestureInProgress(){
-    return drawing || document.documentElement.classList.contains('moving-ink');
+    // cornerDragging covers the frame's own resize corners; elastic.active
+    // covers the top-left format handle's rubber-band settle (still "in
+    // progress" in the brief window after its own pointerup, while it
+    // keeps easing toward elastic.targetW/H every tick -- see elasticTick).
+    // Both write into the ACTIVE scene's `frame` object directly, by
+    // reference, on every tick. Without them here, a second concurrent
+    // touch -- the only way to trigger a scene/layer switch while a
+    // single pointer is still mid-drag -- could reassign `frame` to a
+    // different scene mid-gesture (loadView() does exactly that), and the
+    // still-running drag would then keep resizing whichever scene now
+    // happens to be active instead of the one actually being dragged.
+    // filmDrag covers the filmstrip's own press-and-hold reorder gesture
+    // (see beginFilmThumbGesture): it doesn't touch frame/strokeSegments
+    // itself, but a scene switch mid-drag would still be a confusing
+    // "which gesture wins" situation, so it's blocked here the same way
+    // as everything else -- one primary interaction at a time.
+    return drawing || document.documentElement.classList.contains('moving-ink') || imageDragging || refDragging || cornerDragging || elastic.active || !!filmDrag || eyeDragging;
   }
   function switchScene(idx){
     if(gestureInProgress()) return;
@@ -510,7 +761,7 @@
   function addLayerAbove(){
     if(gestureInProgress()) return;
     const sc = scenes[activeScene];
-    sc.layers.push({ segments: [], history: [], future: [], inkVersion: 0 });
+    sc.layers.push({ segments: [], history: [], future: [], inkVersion: 0, opacity: 1 });
     sc.inkVersion = (sc.inkVersion||0) + 1;
     switchLayer(sc.layers.length-1);
   }
@@ -526,7 +777,7 @@
   function addLayerBelow(){
     if(gestureInProgress()) return;
     const sc = scenes[activeScene];
-    sc.layers.unshift({ segments: [], history: [], future: [], inkVersion: 0 });
+    sc.layers.unshift({ segments: [], history: [], future: [], inkVersion: 0, opacity: 1 });
     sc.inkVersion = (sc.inkVersion||0) + 1;
     sc.activeLayer = 0;
     last = null;
@@ -547,6 +798,160 @@
     loadLayer();
     renderAll();
   }
+  // If the active layer currently holds a picture (nothing drawable),
+  // auto-creates a fresh blank ink layer directly above it and switches
+  // to that instead -- called from pen/eraser/moveBtn right when the
+  // user reaches for one of them, so choosing a drawing tool always
+  // lands somewhere you can actually draw rather than being a dead end.
+  // No-op if the active layer is already ink (the common case). Deletion
+  // of the picture layer itself is a separate, explicit action (the
+  // delete button next to its handles) -- this never removes anything,
+  // only adds a fresh layer above.
+  function ensureDrawableActiveLayer(){
+    const sc = scenes[activeScene];
+    if(sc.layers[sc.activeLayer].type!=='image') return;
+    const insertAt = sc.activeLayer+1;
+    sc.layers.splice(insertAt, 0, { segments:[], history:[], future:[], inkVersion:0, opacity:1 });
+    switchLayer(insertAt);
+  }
+  // Removes ONE specific image layer from its scene (there is no general
+  // layer-deletion in this app -- layers are otherwise append-only -- so
+  // this is deliberately scoped to just the image-layer/reference delete
+  // buttons, not a general-purpose removeLayer). Always safe: image
+  // layers are only ever inserted above index 0 (see placeImageAsLayer),
+  // so a scene never ends up with zero layers after this. The new active
+  // layer becomes whichever one now sits where this one was removed from
+  // (i.e. the layer that was directly below it) -- the layer the user was
+  // presumably just working on before adding the picture.
+  function deleteImageLayer(sceneIdx, layerIdx){
+    const sc = scenes[sceneIdx];
+    if(!sc || !sc.layers[layerIdx] || sc.layers[layerIdx].type!=='image') return;
+    const wasActive = sc.activeLayer;
+    sc.layers.splice(layerIdx, 1);
+    if(wasActive === layerIdx) sc.activeLayer = Math.max(0, layerIdx-1);
+    else if(wasActive > layerIdx) sc.activeLayer = wasActive-1; // shifted down by the removal
+    // else wasActive < layerIdx: that layer's own index is unaffected
+    sc.inkVersion = (sc.inkVersion||0) + 1;
+    last = null;
+    loadLayer();
+    renderAll();
+  }
+  // Inserts a brand-new image layer directly above whichever layer was
+  // active at drop time (activeLayer+1) -- NOT necessarily the very top
+  // of the whole stack, unlike addLayerAbove()'s own "above everything"
+  // convention. Deliberate: dropping a photo while you're deep in an
+  // older layer (browsing via the rail) should land it right there, not
+  // jump past every layer above the one you're actually looking at.
+  // Whenever the active layer already IS the top one (the common case,
+  // since layers are never reordered) this is identical to
+  // addLayerAbove()'s own behavior anyway.
+  // segments/history/future are present but permanently empty (image
+  // layers can't be drawn on or undone) purely so every OTHER code path
+  // that reads a layer's segments/history/future — clearBtn, loadLayer,
+  // updateHistoryButtons, etc. — keeps working unmodified instead of
+  // needing an image-type guard at every call site.
+  function placeImageAsLayer(img, natW, natH){
+    const sc = scenes[activeScene];
+    const r = frameRect();
+    // contain-fit within the frame, never upscaled past native size —
+    // same reasoning as loadAndCompressImage's own scale clamp, just
+    // fitting the shot's window instead of the format's pixel canon
+    const scale = Math.min(1, r.w/natW, r.h/natH);
+    const iw = natW*scale, ih = natH*scale;
+    const layer = {
+      type: 'image', img, natW, natH,
+      ix: r.x + (r.w-iw)/2, iy: r.y + (r.h-ih)/2, iw, ih,
+      segments: [], history: [], future: [], inkVersion: 0, opacity: 1
+    };
+    const insertAt = sc.activeLayer + 1;
+    sc.layers.splice(insertAt, 0, layer);
+    sc.inkVersion = (sc.inkVersion||0) + 1;
+    switchLayer(insertAt);
+  }
+  // Call after mutating an image layer's own ix/iy/iw/ih (drag or scale)
+  // -- mirrors markInkChanged()'s role for ink, so the layer-rail/
+  // filmstrip thumbnail caches (keyed partly on inkVersion) know this
+  // layer's tile can't be reused.
+  function bumpImageLayer(sc, layer){
+    sc.inkVersion = (sc.inkVersion||0) + 1;
+    layer.inkVersion = (layer.inkVersion||0) + 1;
+  }
+
+  // --- reference images: placement, selection, promotion to a layer -----
+  // Display footprint vs. stored pixel data are two different numbers and
+  // this is exactly the distinction that was missing before: natW/natH
+  // (from loadAndCompressImage) is a QUALITY cap -- comfortably bigger
+  // than a typical frame so the picture stays sharp -- not a size the
+  // reference should actually occupy on the canvas. Left as 1:1 world-
+  // units-to-pixels, a photo compressed to near the format canon (e.g.
+  // ~2048 units on its long side) would dwarf the frame itself (~640
+  // units by default), which is exactly the bug this fixes: contain-fit
+  // the DISPLAY rect against the frame's own current w/h -- same math
+  // placeImageAsLayer already uses to size a cadre -- so a fresh
+  // reference never reads as bigger on-screen than "the drawing area's
+  // own dimensions", matching the brief, while natW/natH (and so the
+  // underlying bitmap quality) stay untouched.
+  function placeReference(img, natW, natH, p){
+    const r = frameRect();
+    const scale = Math.min(1, r.w/natW, r.h/natH);
+    const w = natW*scale, h = natH*scale;
+    const ref = { id: refIdCounter++, img, natW, natH, x:p.x-w/2, y:p.y-h/2, w, h };
+    references.push(ref);
+    renderRefElement(ref);
+    return ref;
+  }
+  // One-time paint: draws the (already capped-resolution) source canvas
+  // onto this reference's OWN <canvas> DOM element once, then leaves the
+  // BITMAP alone from then on -- CSS left/top/width/height (world px, see
+  // #refItem's own comment in the CSS) drive its on-screen rect, exactly
+  // like an <img>'s intrinsic bitmap vs. its CSS display size. This is
+  // also why neither moving NOR scaling it (see REF_RESIZE_CORNERS
+  // further below) ever needs a re-draw here: both only ever touch CSS
+  // left/top/width/height, the same way resizing an <img> element never
+  // touches its own source pixels either.
+  function renderRefElement(ref){
+    const el = document.createElement('canvas');
+    el.className = 'refItem';
+    el.width = ref.natW; el.height = ref.natH;
+    el.getContext('2d').drawImage(ref.img, 0, 0);
+    el.style.left = ref.x+'px';
+    el.style.top = ref.y+'px';
+    el.style.width = ref.w+'px';
+    el.style.height = ref.h+'px';
+    el.dataset.refId = ref.id;
+    el.title = 'Референс — перетащите в область рисования, чтобы сделать кадром';
+    refLayerEl.appendChild(el);
+    ref.el = el;
+  }
+  function selectRef(ref){
+    if(selectedRef && selectedRef!==ref) selectedRef.el.classList.remove('selected');
+    selectedRef = ref;
+    ref.el.classList.add('selected');
+    refLayerEl.appendChild(ref.el); // bring to front, in case it overlapped another reference
+    syncRefHandles();
+    syncRefDeleteBtn();
+  }
+  function deselectRef(){
+    if(!selectedRef) return;
+    selectedRef.el.classList.remove('selected');
+    selectedRef = null;
+    syncRefHandles();
+    syncRefDeleteBtn();
+  }
+  // A reference dragged into the open frame and released there becomes a
+  // cadre: removed from the free-floating references[] + its own DOM
+  // element, and handed to placeImageAsLayer() -- the exact same
+  // insertion path a brand-new drop-onto-the-frame uses, so it lands
+  // above the active layer and gets a fresh contain-fit placement rather
+  // than trying to carry over whatever arbitrary size/position it
+  // happened to have out on the canvas.
+  function promoteRefToLayer(ref){
+    references = references.filter(r=>r!==ref);
+    ref.el.remove();
+    if(selectedRef===ref){ selectedRef=null; syncRefHandles(); syncRefDeleteBtn(); }
+    placeImageAsLayer(ref.img, ref.natW, ref.natH);
+  }
+
   // ghost/background-duplicate layer intentionally removed from the active
   // logic (see brief) — the `ghost` canvas element stays in the DOM as a
   // placeholder, reserved for a future, different treatment.
@@ -572,6 +977,61 @@
       if(d<bestDiff){ bestDiff=d; best=p; }
     }
     return best;
+  }
+
+  // --- canonical resolution per format, for compressing dropped photos --
+  // PRESETS above only ever described a RATIO, never an absolute pixel
+  // size — there was no existing notion of "resolution" anywhere in this
+  // file to inherit, so this is a new, small, explicit convention: every
+  // format's canon is "long side = CANON_LONG_SIDE px, short side derived
+  // from that same ratio" — one tunable number instead of seven separate
+  // magic ones, and it mirrors FIT_REF above (which does the exact same
+  // "long side is the one constant reference" trick, just for on-screen
+  // fit size in css px instead of stored pixel count). 2048 is a
+  // deliberately modest "2K-class" choice for a sketching/reference tool
+  // rather than a print pipeline: comfortably sharp even zoomed in a
+  // couple notches on a retina screen, without the memory a full 4K
+  // per-photo budget would cost across a whole storyboard. Bump this one
+  // constant if a project wants sharper (or lighter) images across the
+  // board.
+  const CANON_LONG_SIDE = 2048;
+  function canonicalMaxFor(ratioWH){
+    const p = nearestPreset(ratioWH);
+    return (p.w>=p.h)
+      ? { maxW: CANON_LONG_SIDE, maxH: Math.round(CANON_LONG_SIDE*p.h/p.w) }
+      : { maxH: CANON_LONG_SIDE, maxW: Math.round(CANON_LONG_SIDE*p.w/p.h) };
+  }
+  // Decodes a dropped File into an <img>, then — ONLY if it exceeds the
+  // canon for the CURRENTLY OPEN frame's own format (nearest of the 7
+  // PRESETS to its current w/h ratio) — redraws it once onto an offscreen
+  // canvas at the shrunk size and hands that canvas back instead of the
+  // original. Never upscales (Math.min(1, ...) below): a photo smaller
+  // than canon is left exactly as-is, full quality, per the brief ("if
+  // the user dropped a small picture, that's on them"). The returned
+  // `img` (a canvas, not an <img>) is a perfectly valid drawImage() source
+  // everywhere else in this file treats layer.img/ref.img as one.
+  // No re-encoding happens (no toDataURL/toBlob round-trip) since nothing
+  // persists yet (see the brief) — this is a resample, not a compression
+  // codec, which also means zero quality loss beyond the one resize step
+  // itself.
+  function loadAndCompressImage(file){
+    return new Promise((resolve,reject)=>{
+      const url = URL.createObjectURL(file);
+      const probe = new Image();
+      probe.onload = ()=>{
+        URL.revokeObjectURL(url);
+        const {maxW,maxH} = canonicalMaxFor(frame.w/frame.h);
+        const scale = Math.min(1, maxW/probe.naturalWidth, maxH/probe.naturalHeight);
+        const w = Math.max(1, Math.round(probe.naturalWidth*scale));
+        const h = Math.max(1, Math.round(probe.naturalHeight*scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(probe, 0, 0, w, h);
+        resolve({ img:canvas, natW:w, natH:h });
+      };
+      probe.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('image decode failed')); };
+      probe.src = url;
+    });
   }
 
   // elastic (rubber-band) format snapping state for the top-left handle
@@ -620,6 +1080,11 @@
 
     world.style.left = ((W-WORLD_W)/2)+'px';
     world.style.top = ((H-WORLD_H)/2)+'px';
+    // #world itself just moved -- both cached rects are stale regardless
+    // of what runs next (positionFrame()/applyView(), below, will also
+    // invalidate frameBoxRectCache again on their own, but stageRectCache
+    // has no other write site to hook, so it's cleared here explicitly)
+    stageRectCache = null; frameBoxRectCache = null;
     world.style.width = WORLD_W+'px';
     world.style.height = WORLD_H+'px';
 
@@ -708,14 +1173,14 @@
   // Reuses frameBox's actual on-screen rect (already kept in sync by
   // positionFrame/applyView) instead of re-deriving the transform math.
   function isFocused(){
-    const r = frameBox.getBoundingClientRect();
+    const r = getFrameBoxRect();
     const cx = r.left + r.width/2, cy = r.top + r.height/2;
     return Math.hypot(cx - W/2, cy - (H/2 - effectiveBias())) <= FOCUS_SNAP;
   }
   // true only once the window has fully left the viewport — distinct from
   // isFocused(), which is about being centered, not merely visible
   function isOutOfView(){
-    const r = frameBox.getBoundingClientRect();
+    const r = getFrameBoxRect();
     return r.right<=0 || r.left>=W || r.bottom<=0 || r.top>=H;
   }
   function updateFocus(){
@@ -724,7 +1189,7 @@
     updateHoverAffordance();
   }
   function isPointOnFrameScreen(x,y){
-    const r = frameBox.getBoundingClientRect();
+    const r = getFrameBoxRect();
     return x>=r.left && x<=r.right && y>=r.top && y<=r.bottom;
   }
   // Single source of truth for the "click to recenter" affordance, driven
@@ -735,7 +1200,7 @@
   let lastCX = -9999, lastCY = -9999, lastTarget = null;
   function updateHoverAffordance(){
     if(drawing) return;
-    const overHandle = !!(lastTarget && lastTarget.closest && lastTarget.closest('.handleZone'));
+    const overHandle = !!(lastTarget && lastTarget.closest && (lastTarget.closest('.handleZone') || lastTarget.closest('.imgHandleZone') || lastTarget.closest('.refHandleZone') || lastTarget.closest('.pictureDeleteBtn')));
     // never show both affordances at once: a handle's own hover square
     // already signals "you can interact here"
     const hover = !cornerDragging && !overHandle && !focused && isPointOnFrameScreen(lastCX, lastCY);
@@ -750,8 +1215,8 @@
     // keep geometry live even while fading out — the CSS opacity
     // transition takes ~150ms, and the window can still be animating
     // back to center during that time
-    const r = frameBox.getBoundingClientRect();
-    const sr = stage.getBoundingClientRect();
+    const r = getFrameBoxRect();
+    const sr = getStageRect();
     focusRing.style.left = (r.left - sr.left)+'px';
     focusRing.style.top = (r.top - sr.top)+'px';
     focusRing.style.width = r.width+'px';
@@ -818,7 +1283,35 @@
   function renderStrokes(){
     fctx.clearRect(0,0,CW,CH);
     nctx.clearRect(0,0,CW,CH);
-    classifyAndStroke(strokeSegments, frameRect(), fctx, nctx);
+    const activeLayerObj = scenes[activeScene].layers[scenes[activeScene].activeLayer];
+    fctx.globalAlpha = nctx.globalAlpha = activeLayerObj.opacity;
+    if(activeLayerObj.type==='image'){
+      drawImageLayerClipped(fctx, activeLayerObj, frameRect());
+    } else {
+      classifyAndStroke(strokeSegments, frameRect(), fctx, nctx);
+    }
+    fctx.globalAlpha = nctx.globalAlpha = 1;
+  }
+  // Draws one image layer's picture into ctx, hard-clipped to the frame
+  // rect r (canvas-buffer-local coords, i.e. already offset by
+  // canvasOriginX/Y same as strokeSeg does) — this is what keeps a photo
+  // from ever visually spilling past the shot's own window. Unlike ink,
+  // there's no "ghost" treatment for whatever falls outside r: the brief
+  // is that the picture simply hides there (non-destructively — ix/iy/
+  // iw/ih keep describing its true position/size regardless), not that
+  // it gets a dim outside-the-window preview the way strokes do.
+  // The clip rect is padded by 1px on every side (same trick as
+  // updateClipPath()'s own `bleed`) so THIS clip is never the tightest
+  // one in the stack — the outer CSS clip-path on the canvas element
+  // itself (already inset+bled the same way) stays the true boundary,
+  // avoiding a double-clip seam at the edge.
+  function drawImageLayerClipped(ctx, layer, r){
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x-canvasOriginX-1, r.y-canvasOriginY-1, r.w+2, r.h+2);
+    ctx.clip();
+    ctx.drawImage(layer.img, layer.ix-canvasOriginX, layer.iy-canvasOriginY, layer.iw, layer.ih);
+    ctx.restore();
   }
   // Flattens every OTHER layer of the active scene (i.e. everything
   // except the one currently live on front/notes) into two composites by
@@ -842,7 +1335,13 @@
     sc.layers.forEach((layer,i)=>{
       if(i===sc.activeLayer) return;
       gsfCtx.clearRect(0,0,CW,CH); gsnCtx.clearRect(0,0,CW,CH);
-      classifyAndStroke(layer.segments, r, gsfCtx, gsnCtx);
+      gsfCtx.globalAlpha = gsnCtx.globalAlpha = layer.opacity;
+      if(layer.type==='image'){
+        drawImageLayerClipped(gsfCtx, layer, r); // gsnCtx stays empty -- see drawImageLayerClipped's comment
+      } else {
+        classifyAndStroke(layer.segments, r, gsfCtx, gsnCtx);
+      }
+      gsfCtx.globalAlpha = gsnCtx.globalAlpha = 1;
       const targetF = i < sc.activeLayer ? fctxBelow : fctxAbove;
       const targetN = i < sc.activeLayer ? nctxBelow : nctxAbove;
       [[targetF,groupScratchF],[targetN,groupScratchN]].forEach(([dst,src])=>{
@@ -916,8 +1415,36 @@
   // resizing the frame window around it is a real visual change these
   // thumbnails must track despite never touching inkVersion.
   const sceneThumbCache = new Map();
-  const layerThumbCache = new Map();
+  // WeakMap, not Map: deleteImageLayer() splices a layer object out of
+  // sc.layers, but a plain Map would still hold that object forever as a
+  // cache key, its own thumbnail canvas included -- a real per-deleted-
+  // image-layer leak over a long session. sceneThumbCache just above
+  // stays a regular Map on purpose: there's no way to delete a whole
+  // scene anywhere in this app, so every key ever inserted there remains
+  // legitimately reachable via scenes[] for the tab's entire lifetime
+  // regardless.
+  const layerThumbCache = new WeakMap();
   function frameSig(r){ return r.x+'|'+r.y+'|'+r.w+'|'+r.h; }
+  // Shared by both thumbnail painters (layer rail circle + filmstrip
+  // scene tile) for drawing an image layer's own visible (frame-clipped)
+  // portion into a small destination canvas. Each caller passes its own
+  // `map(pt)` closure -- the rail's circle uses a "cover" crop, the
+  // filmstrip's tile uses a plain "contain" fit matching the frame's own
+  // aspect -- this function doesn't care which; it just intersects the
+  // image's rect with the frame rect r, then maps both corners of that
+  // intersection through map() to get the destination rect, and works
+  // out the matching SOURCE rect (in the image bitmap's own pixels) via
+  // simple proportional math. No-ops if the image doesn't overlap the
+  // frame at all (fully dragged out of view).
+  function drawImageIntoThumb(ctx, layer, r, map){
+    const ix0=Math.max(layer.ix,r.x), iy0=Math.max(layer.iy,r.y);
+    const ix1=Math.min(layer.ix+layer.iw,r.x+r.w), iy1=Math.min(layer.iy+layer.ih,r.y+r.h);
+    if(ix1<=ix0 || iy1<=iy0) return;
+    const sx=(ix0-layer.ix)/layer.iw*layer.img.width, sy=(iy0-layer.iy)/layer.ih*layer.img.height;
+    const sw=(ix1-ix0)/layer.iw*layer.img.width, sh=(iy1-iy0)/layer.ih*layer.img.height;
+    const d0=map({x:ix0,y:iy0}), d1=map({x:ix1,y:iy1});
+    ctx.drawImage(layer.img, sx,sy,sw,sh, d0.x,d0.y, d1.x-d0.x, d1.y-d0.y);
+  }
   // Invalidates the cached thumbnail for whichever scene/layer is
   // CURRENTLY active by bumping the counters the cache above compares
   // against. Call this right after any mutation to strokeSegments (the
@@ -949,10 +1476,42 @@
   // mask in CSS rather than hard-clipping a tile mid-way.
   const VISIBLE_COUNT = 6;
   const FADE_PX = 28;
-  function renderFilmstrip(){
-    filmTrack.innerHTML = '';
-    const GAP = 8;
-    const availW = frameBox.getBoundingClientRect().width;
+  // shared with computeFilmSlots() below AND the drag-reorder hit-test in
+  // beginFilmThumbGesture() further down -- one gap value, so a dragged
+  // tile's drop point always lines up with the boundary pass 2 actually
+  // draws between two tiles.
+  const GAP = 8;
+  function renderFilmstrip(){ renderFilmstripWindowed(true); }
+
+  // Off-screen scenes (scrolled out of the visible tray) don't get their
+  // thumbnail canvas built at all — only their WIDTH is known (cheap,
+  // pure arithmetic from fitTile, no canvas/DOM work), and a single
+  // lightweight spacer div stands in for each contiguous run of them so
+  // the track's total scrollable width and every visible tile's position
+  // stay exactly correct. A generous buffer around the visible viewport
+  // (bigger than the fade zone and the widest possible tile) means
+  // nothing pops in visibly right at the edge before the window updates.
+  // forceScrollToActive=true (the normal entry point, on any content
+  // change) snaps the strip to center the active scene, matching the old
+  // behavior exactly. forceScrollToActive=false (from the scroll listener
+  // below) rebuilds the DOM for whatever's now visible WITHOUT touching
+  // scrollLeft, so it doesn't fight the user's own manual scroll/wheel —
+  // without this, scrolling the tray to browse other scenes without
+  // switching to one would just show empty spacers where their thumbnails
+  // should be, since nothing would ever tell the window to follow.
+  const FILMSTRIP_WINDOW_BUFFER = 200;
+  // Pure geometry: every slot's size and cumulative x-offset within the
+  // (unscrolled, unwindowed) track, for scenes[] in its CURRENT order. No
+  // canvas/DOM work, so it's cheap to call once a render as well as
+  // continuously while a film-drag is live -- beginFilmThumbGesture()
+  // further down needs these same x/w numbers to know which slot the
+  // pointer is currently sitting over. Kept as its own function
+  // specifically so there's exactly one place that knows this layout
+  // math: drag hit-testing silently drifting out of sync with what's
+  // actually drawn would be a much worse bug than a slightly-off drop
+  // target.
+  function computeFilmSlots(){
+    const availW = getFrameBoxRect().width;
     // tile size is derived ONLY from fitting exactly VISIBLE_COUNT tiles
     // across the frame's width — it no longer shrinks just because more
     // scenes exist; extra slots scroll instead of squeezing everyone in
@@ -984,137 +1543,406 @@
     // tiles never move.
     const sceneStart = 1;
 
-    // Fade should reflect whether `count` slots actually overflow availW,
-    // not just whether count>VISIBLE_COUNT — those aren't the same thing.
-    // Tiles aren't uniform width here (each scene keeps its own aspect
-    // ratio via fitTile above), so — unlike the layer rail's same-size
-    // circles — the real total can't be derived from a single tw; each
-    // slot's actual width is summed instead, mirroring the same
-    // sceneIdx/sceneStart lookup the render loop below uses, so this stays
-    // consistent with whatever actually gets drawn.
-    let contentW = 0;
+    // every slot's size and its cumulative x-offset within the track.
+    // Pure arithmetic — O(scenes) regardless of how many end up actually
+    // visible, which is what makes windowing the expensive part (pass 2,
+    // in renderFilmstripWindowed) possible: this has to see everything
+    // anyway to know the track's real total width and where each tile
+    // WOULD sit, on- or off-screen alike.
+    const slots = [];
+    let cursorX = 0;
     for(let i=0; i<count; i++){
       const sceneIdx = i - sceneStart;
       const sc = (sceneIdx>=0 && sceneIdx<scenes.length) ? scenes[sceneIdx] : null;
-      contentW += sc ? fitTile(sc.frame.w/sc.frame.h).w : addTile.w;
+      const sz = sc ? fitTile(sc.frame.w/sc.frame.h) : addTile;
+      slots.push({ sceneIdx, sc, x:cursorX, w:sz.w, h:sz.h });
+      cursorX += sz.w + GAP;
     }
-    contentW += GAP*(count-1);
+    const contentW = Math.max(0, cursorX - GAP);
+    return { slots, contentW, availW };
+  }
+  function renderFilmstripWindowed(forceScrollToActive){
+    const { slots, contentW, availW } = computeFilmSlots();
     filmTrack.style.setProperty('--fade', (contentW > availW + 0.5 ? FADE_PX : 0)+'px');
 
-    let activeEl = null;
-    for(let i=0; i<count; i++){
-      const sceneIdx = i - sceneStart;
-      if(sceneIdx>=0 && sceneIdx<scenes.length){
-        const sc = scenes[sceneIdx];
-        // map through THIS scene's own window, never the active one's —
-        // otherwise resizing/reformatting one panel would visibly distort
-        // every other panel's thumbnail too
-        const r = sc.frame;
-        const { w:tileW, h:tileH } = fitTile(r.w/r.h);
-        const thumb = document.createElement('canvas');
-        thumb.className = 'filmThumb' + (sceneIdx===activeScene ? ' active' : '');
-        thumb.width = tileW*2; thumb.height = tileH*2;
-        thumb.style.width = tileW+'px'; thumb.style.height = tileH+'px';
-        const pxW = thumb.width, pxH = thumb.height; // browser-coerced integer size, used as the cache key
-        const sig = frameSig(r);
+    const viewW = filmTrack.clientWidth || availW;
+    const maxScroll = Math.max(0, contentW - viewW);
+    let scrollPos;
+    if(forceScrollToActive){
+      const activeSlot = slots.find(s => s.sceneIdx===activeScene);
+      // NOTE: deliberately not using activeEl.scrollIntoView() for this —
+      // when filmTrack alone can't satisfy inline centering (not enough
+      // scroll room), the browser's ancestor walk falls through to #stage
+      // (which has overflow:hidden, but is still a legal scroll target
+      // per spec) and scrolls IT instead, dragging the whole canvas/
+      // toolbar/zoom UI sideways with it. Computing scrollLeft by hand
+      // keeps the effect strictly local to the strip no matter how little
+      // room it has — and now doubles as pass 1's own answer for which
+      // slots pass 2 needs to actually build.
+      scrollPos = activeSlot
+        ? Math.max(0, Math.min(activeSlot.x + activeSlot.w/2 - viewW/2, maxScroll))
+        : Math.max(0, Math.min(filmTrack.scrollLeft, maxScroll));
+    } else {
+      // a scroll-triggered re-window: follow wherever the user actually
+      // scrolled/wheeled to, don't override it
+      scrollPos = filmTrack.scrollLeft;
+    }
 
-        // The re-stroke-every-segment-of-every-layer work below is the
-        // expensive part — skip it whenever this scene's ink, this
-        // tile's pixel size, and this scene's frame geometry are all
-        // unchanged since the last time it was painted, and just blit
-        // the cached bitmap instead. On a typical render (switching
-        // scenes, panning, resizing a DIFFERENT scene's frame) only the
-        // scene actually being edited misses the cache.
-        let cache = sceneThumbCache.get(sc);
-        if(!cache || cache.version!==sc.inkVersion || cache.w!==pxW || cache.h!==pxH || cache.sig!==sig){
-          if(!cache){ cache = { canvas: document.createElement('canvas') }; sceneThumbCache.set(sc, cache); }
-          cache.canvas.width = pxW; cache.canvas.height = pxH;
-          cache.w = pxW; cache.h = pxH; cache.version = sc.inkVersion; cache.sig = sig;
-          const tctx = cache.canvas.getContext('2d');
-          tctx.scale(2,2);
-          tctx.fillStyle = '#f4f2ee';
-          tctx.fillRect(0,0,tileW,tileH);
-          const map = pt => ({ x:(pt.x-r.x)/r.w*tileW, y:(pt.y-r.y)/r.h*tileH });
-          // scale stroke width by the SAME factor as the geometry, so the
-          // thumbnail reflects the real drawing's actual proportions rather
-          // than a fixed pixel width that reads as disproportionately bold
-          // once a shot is shrunk down a lot (e.g. a small tile sitting
-          // next to a much bigger active one) — matches BLACK_OPTS' real
-          // on-canvas widths (2.2 normal / 16 erase), just scaled down.
-          // Floored so a very small tile's line doesn't fade to invisible.
-          const thumbScale = tileW / r.w;
-          const paintLayer = (segs, ctx) => segs.forEach(seg=>{
-            const aIn = inFrameRect(seg.a,r), bIn = inFrameRect(seg.b,r);
-            if(!aIn && !bIn) return;
-            let a=seg.a, b=seg.b;
-            if(!(aIn && bIn)){
-              const exit = aIn ? rectExit(a,b,r) : rectExit(b,a,r);
-              if(aIn) b = exit; else a = exit;
-            }
-            const ma = map(a), mb = map(b);
-            ctx.save();
-            if(seg.erase) ctx.globalCompositeOperation = 'destination-out';
-            ctx.strokeStyle = 'rgba(30,28,24,.88)';
-            ctx.lineWidth = Math.max(0.4, (seg.erase ? 16 : 2.2) * thumbScale);
-            ctx.lineCap = 'round';
-            ctx.beginPath();
-            ctx.moveTo(ma.x,ma.y); ctx.lineTo(mb.x,mb.y);
-            ctx.stroke();
-            ctx.restore();
-          });
-          // paint every layer in stacking order, each isolated on a small
-          // reused scratch tile first and only then flattened onto the
-          // cached bitmap — same reasoning as renderStaticLayers() above:
-          // without this, an eraser stroke on one layer could eat into a
-          // different layer's ink the moment they share one bitmap.
-          const tileScratch = document.createElement('canvas');
-          tileScratch.width = pxW; tileScratch.height = pxH;
-          const scCtx = tileScratch.getContext('2d');
-          scCtx.scale(2,2);
-          sc.layers.forEach(layer=>{
-            scCtx.clearRect(0,0,tileW,tileH);
-            paintLayer(layer.segments, scCtx);
-            tctx.save(); tctx.setTransform(1,0,0,1,0,0);
-            tctx.drawImage(tileScratch,0,0);
-            tctx.restore();
-          });
-        }
-        thumb.getContext('2d').drawImage(cache.canvas, 0, 0);
-        thumb.title = 'Кадр ' + (sceneIdx+1);
-        thumb.addEventListener('pointerdown', ev=>{ ev.stopPropagation(); switchScene(sceneIdx); });
-        filmTrack.appendChild(thumb);
-        if(sceneIdx===activeScene) activeEl = thumb;
+    // PASS 2: build real DOM only for slots inside [scrollPos-buffer,
+    // scrollPos+viewW+buffer]; everything else in a contiguous off-window
+    // run collapses into one spacer. Add-slots always render for real
+    // regardless of position — there are only ever two of them, and they
+    // have no canvas content to skip painting in the first place.
+    const winStart = scrollPos - FILMSTRIP_WINDOW_BUFFER;
+    const winEnd = scrollPos + viewW + FILMSTRIP_WINDOW_BUFFER;
+    filmTrack.innerHTML = '';
+    let i = 0;
+    while(i < slots.length){
+      const s = slots[i];
+      const inWindow = !s.sc || (s.x + s.w > winStart && s.x < winEnd);
+      if(inWindow){
+        filmTrack.appendChild(buildFilmstripSlot(s));
+        i++;
       } else {
-        // empty slot: in front of the real block -> prepend a new scene
-        // before the first one; behind it -> append a new scene after
-        // the last one. Both are otherwise identical dashed "+" tiles.
-        const addBtn = document.createElement('div');
-        addBtn.className = 'filmAdd';
-        addBtn.style.width = addTile.w+'px'; addBtn.style.height = addTile.h+'px';
-        addBtn.textContent = '+';
-        const isFront = sceneIdx<0;
-        addBtn.title = isFront ? 'Новый кадр (в начало)' : 'Новый кадр';
-        addBtn.addEventListener('pointerdown', ev=>{
-          ev.stopPropagation();
-          if(isFront) prependScene(); else addScene();
-        });
-        filmTrack.appendChild(addBtn);
+        let spacerW = 0;
+        while(i < slots.length && slots[i].sc && !(slots[i].x + slots[i].w > winStart && slots[i].x < winEnd)){
+          spacerW += slots[i].w + GAP;
+          i++;
+        }
+        const spacer = document.createElement('div');
+        // flex:none locks the width exactly as computed — default
+        // flex-shrink:1 would otherwise let the container squeeze it,
+        // throwing off every real tile's position on either side of it
+        spacer.style.cssText = 'flex:none;width:'+Math.max(0, spacerW-GAP)+'px;';
+        filmTrack.appendChild(spacer);
       }
     }
-    // keep the active tile in view (no-op if it's already fully visible).
-    // NOTE: deliberately NOT using activeEl.scrollIntoView() here — when
-    // filmTrack alone can't satisfy inline centering (not enough scroll
-    // room), the browser's ancestor walk falls through to #stage (which
-    // has overflow:hidden, but is still a legal scroll target per spec)
-    // and scrolls IT instead, dragging the whole canvas/toolbar/zoom UI
-    // sideways with it. Computing scrollLeft by hand keeps the effect
-    // strictly local to the strip, no matter how little room it has.
-    if(activeEl){
-      const target = activeEl.offsetLeft + activeEl.offsetWidth/2 - filmTrack.clientWidth/2;
-      const maxScroll = filmTrack.scrollWidth - filmTrack.clientWidth;
-      filmTrack.scrollLeft = Math.max(0, Math.min(target, maxScroll));
+
+    if(forceScrollToActive) filmTrack.scrollLeft = scrollPos;
+  }
+
+  // Builds one slot's real DOM element — a scene's thumbnail canvas (with
+  // the same cache-or-repaint logic as always), an empty dashed drop-slot
+  // if this scene is currently being dragged (see beginFilmThumbGesture
+  // further down), or an "add new scene" dashed placeholder. Split out of
+  // renderFilmstripWindowed() above so pass 2 only ever calls this for
+  // slots actually inside the window.
+  function buildFilmstripSlot(s){
+    const { sceneIdx, sc, w:tileW, h:tileH } = s;
+    if(sc){
+      // Ordinal number, laid directly over whichever visual this slot
+      // ends up with below. Derived purely from sceneIdx -- this slot's
+      // live position in scenes[] -- rather than anything stored on the
+      // scene, so prepending/appending/dragging frames renumbers every
+      // tile for free on the very next render, nothing to migrate or
+      // keep in sync. A scene-grouping LETTER is planned to sit right
+      // after this same digit once frames can be grouped into scenes
+      // (e.g. "3B") -- see .filmThumbNum's comment in the CSS.
+      const wrap = document.createElement('div');
+      wrap.className = 'filmThumbWrap';
+      wrap.style.width = tileW+'px'; wrap.style.height = tileH+'px';
+      const num = document.createElement('div');
+      num.className = 'filmThumbNum';
+      num.textContent = String(sceneIdx+1);
+
+      // The tile currently "picked up" mid-drag (see beginFilmThumbGesture
+      // further down) renders as an empty dashed target slot instead of
+      // its usual thumbnail -- reusing .filmAdd's own "nothing here yet"
+      // visual language -- so it reads unambiguously as "the frame will
+      // land HERE", a predicted future position, rather than "this
+      // thumbnail just got darker for some reason". The actual artwork
+      // stays visible on the floating ghost that follows the pointer;
+      // this slot is purely the prediction. Bailing out this early also
+      // skips the whole cache/repaint path below, which matters since
+      // this rebuilds on every single index crossing while a drag is live.
+      if(filmDrag && filmDrag.armed && filmDrag.sc===sc){
+        const slot = document.createElement('div');
+        slot.className = 'filmDropSlot';
+        slot.style.width = tileW+'px'; slot.style.height = tileH+'px';
+        wrap.appendChild(slot);
+        wrap.appendChild(num);
+        return wrap;
+      }
+
+      // map through THIS scene's own window, never the active one's —
+      // otherwise resizing/reformatting one panel would visibly distort
+      // every other panel's thumbnail too
+      const r = sc.frame;
+      const thumb = document.createElement('canvas');
+      thumb.className = 'filmThumb' + (sceneIdx===activeScene ? ' active' : '');
+      thumb.width = tileW*2; thumb.height = tileH*2;
+      thumb.style.width = tileW+'px'; thumb.style.height = tileH+'px';
+      const pxW = thumb.width, pxH = thumb.height; // browser-coerced integer size, used as the cache key
+      const sig = frameSig(r);
+
+      // The re-stroke-every-segment-of-every-layer work below is the
+      // expensive part — skip it whenever this scene's ink, this
+      // tile's pixel size, and this scene's frame geometry are all
+      // unchanged since the last time it was painted, and just blit
+      // the cached bitmap instead. On a typical render (switching
+      // scenes, panning, resizing a DIFFERENT scene's frame) only the
+      // scene actually being edited misses the cache.
+      let cache = sceneThumbCache.get(sc);
+      if(!cache || cache.version!==sc.inkVersion || cache.w!==pxW || cache.h!==pxH || cache.sig!==sig){
+        if(!cache){ cache = { canvas: document.createElement('canvas') }; sceneThumbCache.set(sc, cache); }
+        cache.canvas.width = pxW; cache.canvas.height = pxH;
+        cache.w = pxW; cache.h = pxH; cache.version = sc.inkVersion; cache.sig = sig;
+        const tctx = cache.canvas.getContext('2d');
+        tctx.scale(2,2);
+        tctx.fillStyle = '#f4f2ee';
+        tctx.fillRect(0,0,tileW,tileH);
+        const map = pt => ({ x:(pt.x-r.x)/r.w*tileW, y:(pt.y-r.y)/r.h*tileH });
+        // scale stroke width by the SAME factor as the geometry, so the
+        // thumbnail reflects the real drawing's actual proportions rather
+        // than a fixed pixel width that reads as disproportionately bold
+        // once a shot is shrunk down a lot (e.g. a small tile sitting
+        // next to a much bigger active one) — matches BLACK_OPTS' real
+        // on-canvas widths (2.2 normal / 16 erase), just scaled down.
+        // Floored so a very small tile's line doesn't fade to invisible.
+        const thumbScale = tileW / r.w;
+        const paintLayer = (segs, ctx) => segs.forEach(seg=>{
+          const aIn = inFrameRect(seg.a,r), bIn = inFrameRect(seg.b,r);
+          if(!aIn && !bIn) return;
+          let a=seg.a, b=seg.b;
+          if(!(aIn && bIn)){
+            const exit = aIn ? rectExit(a,b,r) : rectExit(b,a,r);
+            if(aIn) b = exit; else a = exit;
+          }
+          const ma = map(a), mb = map(b);
+          ctx.save();
+          if(seg.erase) ctx.globalCompositeOperation = 'destination-out';
+          ctx.strokeStyle = 'rgba(30,28,24,.88)';
+          ctx.lineWidth = Math.max(0.4, (seg.erase ? 16 : 2.2) * thumbScale);
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(ma.x,ma.y); ctx.lineTo(mb.x,mb.y);
+          ctx.stroke();
+          ctx.restore();
+        });
+        // paint every layer in stacking order, each isolated on a small
+        // reused scratch tile first and only then flattened onto the
+        // cached bitmap — same reasoning as renderStaticLayers() above:
+        // without this, an eraser stroke on one layer could eat into a
+        // different layer's ink the moment they share one bitmap.
+        const tileScratch = document.createElement('canvas');
+        tileScratch.width = pxW; tileScratch.height = pxH;
+        const scCtx = tileScratch.getContext('2d');
+        scCtx.scale(2,2);
+        sc.layers.forEach(layer=>{
+          scCtx.clearRect(0,0,tileW,tileH);
+          scCtx.globalAlpha = layer.opacity;
+          if(layer.type==='image'){ drawImageIntoThumb(scCtx, layer, r, map); }
+          else { paintLayer(layer.segments, scCtx); }
+          scCtx.globalAlpha = 1;
+          tctx.save(); tctx.setTransform(1,0,0,1,0,0);
+          tctx.drawImage(tileScratch,0,0);
+          tctx.restore();
+        });
+      }
+      thumb.getContext('2d').drawImage(cache.canvas, 0, 0);
+      thumb.title = 'Кадр ' + (sceneIdx+1);
+      // Click switches to this scene; press-and-hold-still picks it up
+      // for reordering instead -- beginFilmThumbGesture() below is what
+      // tells the two apart, so this listener no longer decides that
+      // itself.
+      thumb.addEventListener('pointerdown', ev=>{ ev.stopPropagation(); beginFilmThumbGesture(ev, sceneIdx, thumb); });
+      wrap.appendChild(thumb);
+      wrap.appendChild(num);
+      return wrap;
+    } else {
+      // empty slot: in front of the real block -> prepend a new scene
+      // before the first one; behind it -> append a new scene after
+      // the last one. Both are otherwise identical dashed "+" tiles.
+      const addBtn = document.createElement('div');
+      addBtn.className = 'filmAdd';
+      addBtn.style.width = tileW+'px'; addBtn.style.height = tileH+'px';
+      addBtn.textContent = '+';
+      const isFront = sceneIdx<0;
+      addBtn.title = isFront ? 'Новый кадр (в начало)' : 'Новый кадр';
+      addBtn.addEventListener('pointerdown', ev=>{
+        ev.stopPropagation();
+        if(isFront) prependScene(); else addScene();
+      });
+      return addBtn;
     }
   }
+
+  // --- filmstrip: press-and-hold a thumbnail to reorder it -------------
+  // filmDrag is non-null for the ENTIRE gesture, from the initial
+  // pointerdown through to release/cancel -- not just once it's actually
+  // dragging. `armed` (false until the hold timer fires) is what
+  // distinguishes "might still just be a click" from "now reordering
+  // live". Keeping both under one object, rather than a separate
+  // "pending" vs "dragging" flag, means there's exactly one place
+  // (cleanup(), inside beginFilmThumbGesture) that ever nulls it out, so
+  // gestureInProgress() and a stray second pointerdown elsewhere always
+  // see consistent state.
+  //   sc        - the scene object being moved (identity, not index --
+  //               its index is exactly the thing that's changing)
+  //   curIndex  - that scene's current live position in scenes[]
+  //   pointerId - which pointer owns this gesture, so a second touch
+  //               starting elsewhere is ignored by this gesture's own
+  //               listeners rather than hijacking it
+  //   armed     - true once the hold timer has fired
+  //   grabDX/DY - where inside the tile the user actually pressed, so the
+  //               floating ghost stays attached to that same spot under
+  //               the pointer instead of snapping its corner to it
+  let filmDrag = null;
+  const FILM_DRAG_HOLD_MS = 220; // how long a press must hold still before it becomes a drag
+  const FILM_DRAG_MOVE_SLOP = 10; // px of movement, before that hold fires, that reads as "scrolling the strip" instead and cancels it
+
+  const filmDragGhostEl = document.getElementById('filmDragGhost');
+  const filmDragGhostCanvas = filmDragGhostEl.querySelector('canvas');
+  const filmDragGhostNum = filmDragGhostEl.querySelector('.filmThumbNum');
+
+  // Moves the scene at fromIdx to end up at toIdx (both indices into
+  // scenes[] as it stands right now), preserving every other scene's
+  // relative order. activeScene is re-derived by identity
+  // (scenes.indexOf) rather than patched by hand with shift arithmetic:
+  // that's correct with zero risk of an off-by-one, regardless of
+  // whether the scene being moved IS the active one, is unrelated to it,
+  // or the move just happens to cross over it. Never touches
+  // frame/strokeSegments/etc -- those are direct references into
+  // whichever scene object is active, and that object's identity never
+  // changes here, only where it lives in the array -- so this is safe to
+  // run mid-drag without any of the loadView()/loadLayer() machinery
+  // switchScene() needs for an actual scene change.
+  function moveScene(fromIdx, toIdx){
+    if(fromIdx===toIdx) return;
+    const activeObj = scenes[activeScene];
+    const [moved] = scenes.splice(fromIdx, 1);
+    scenes.splice(toIdx, 0, moved);
+    activeScene = scenes.indexOf(activeObj);
+  }
+  // Which scenes[] index a drag currently sitting at this viewport X
+  // would land at if dropped right now. Snaps to the CLOSEST real tile's
+  // center rather than "the tile strictly under the pointer", so the
+  // target updates smoothly across gaps/spacers and naturally clamps to
+  // 0/length-1 once the pointer's dragged past either end -- no special
+  // casing needed for "before the first tile" or "past the last".
+  function filmSlotIndexAt(clientX){
+    const trackRect = filmTrack.getBoundingClientRect();
+    const localX = clientX - trackRect.left + filmTrack.scrollLeft;
+    const real = computeFilmSlots().slots.filter(s => s.sc);
+    let best = 0, bestDist = Infinity;
+    real.forEach((s, i) => {
+      const d = Math.abs(localX - (s.x + s.w/2));
+      if(d < bestDist){ bestDist = d; best = i; }
+    });
+    return best;
+  }
+  function showFilmDragGhost(sc, w, h){
+    filmDragGhostEl.style.width = w+'px';
+    filmDragGhostEl.style.height = h+'px';
+    filmDragGhostCanvas.width = w*2; filmDragGhostCanvas.height = h*2;
+    filmDragGhostCanvas.style.width = w+'px'; filmDragGhostCanvas.style.height = h+'px';
+    // reuse whatever's already cached for this scene's thumbnail -- it
+    // was just painted moments ago building the real tile, so it's
+    // guaranteed fresh; no need to re-stroke any ink to get a ghost
+    const cache = sceneThumbCache.get(sc);
+    if(cache) filmDragGhostCanvas.getContext('2d').drawImage(cache.canvas, 0, 0, filmDragGhostCanvas.width, filmDragGhostCanvas.height);
+    filmDragGhostNum.textContent = String(filmDrag.curIndex+1);
+    filmDragGhostEl.style.display = 'block';
+  }
+  function positionFilmDragGhost(clientX, clientY){
+    filmDragGhostEl.style.left = (clientX - filmDrag.grabDX)+'px';
+    filmDragGhostEl.style.top = (clientY - filmDrag.grabDY)+'px';
+  }
+  function hideFilmDragGhost(){
+    filmDragGhostEl.style.display = 'none';
+  }
+  // Disambiguates a plain click (switch to this scene) from a
+  // press-and-hold-then-drag (reorder it) off ONE pointerdown, without
+  // ever blocking the filmstrip's native horizontal scroll:
+  //  - releasing before the hold timer fires is a click -> switchScene().
+  //  - moving past FILM_DRAG_MOVE_SLOP BEFORE the timer fires reads as
+  //    swiping to scroll the strip, not holding still to pick a tile up
+  //    -- the timer is cancelled and nothing is captured or prevented,
+  //    so native scrolling proceeds exactly as if this listener weren't
+  //    here at all.
+  //  - holding still past FILM_DRAG_HOLD_MS arms the drag: from that
+  //    point on, this pointer's moves reorder scenes[] live instead.
+  function beginFilmThumbGesture(ev, sceneIdx, thumb){
+    if(gestureInProgress()) return; // covers filmDrag too, see its clause there
+    const pointerId = ev.pointerId;
+    const startX = ev.clientX, startY = ev.clientY;
+    filmDrag = { sc: scenes[sceneIdx], curIndex: sceneIdx, pointerId, armed:false };
+
+    const holdTimer = setTimeout(arm, FILM_DRAG_HOLD_MS);
+
+    function arm(){
+      if(!filmDrag) return; // released/cancelled the same tick the timer fired -- nothing to do
+      filmDrag.armed = true;
+      const r = thumb.getBoundingClientRect();
+      filmDrag.grabDX = startX - r.left;
+      filmDrag.grabDY = startY - r.top;
+      // may be silently released the moment the first live re-render
+      // below replaces `thumb` with a fresh canvas -- harmless, since
+      // move/up/cancel are handled on window regardless of capture.
+      try{ thumb.setPointerCapture(pointerId); }catch(e){}
+      document.documentElement.classList.add('film-dragging');
+      showFilmDragGhost(filmDrag.sc, r.width, r.height);
+      positionFilmDragGhost(startX, startY);
+      renderFilmstripWindowed(false); // swap the source tile for its drop-slot placeholder now that it's "picked up"
+    }
+    function onMove(mv){
+      if(mv.pointerId!==pointerId || !filmDrag) return;
+      if(!filmDrag.armed){
+        const dx = mv.clientX-startX, dy = mv.clientY-startY;
+        if(Math.hypot(dx,dy) > FILM_DRAG_MOVE_SLOP){ clearTimeout(holdTimer); cleanup(); }
+        return;
+      }
+      if(mv.cancelable) mv.preventDefault();
+      positionFilmDragGhost(mv.clientX, mv.clientY);
+      const target = filmSlotIndexAt(mv.clientX);
+      if(target !== filmDrag.curIndex){
+        moveScene(filmDrag.curIndex, target);
+        filmDrag.curIndex = target;
+        filmDragGhostNum.textContent = String(target+1);
+        renderFilmstripWindowed(false);
+      }
+    }
+    function onUp(up){
+      if(up.pointerId!==pointerId) return;
+      clearTimeout(holdTimer);
+      if(filmDrag && filmDrag.armed) endFilmDrag();
+      else { cleanup(); switchScene(sceneIdx); }
+    }
+    function onCancel(cv){
+      if(cv.pointerId!==pointerId) return;
+      clearTimeout(holdTimer);
+      if(filmDrag && filmDrag.armed) endFilmDrag(); else cleanup();
+    }
+    function endFilmDrag(){
+      hideFilmDragGhost();
+      document.documentElement.classList.remove('film-dragging');
+      cleanup();
+      renderFilmstripWindowed(false); // scenes[] is already final -- this just swaps the drop-slot back for a real thumbnail
+    }
+    function cleanup(){
+      filmDrag = null;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+  }
+  // Scrolling the tray (wheel or native drag) doesn't run through
+  // renderFilmstripWindowed() on its own — nothing else would ever tell
+  // the visible window to follow, leaving whatever the user scrolled INTO
+  // view as empty spacers. Coalesced to at most once per animation frame,
+  // same idea as scheduleHeavyRerender() above, since a fling/momentum
+  // scroll can fire many 'scroll' events per frame.
+  let filmstripScrollRAF = null;
+  filmTrack.addEventListener('scroll', () => {
+    if(filmstripScrollRAF) return;
+    filmstripScrollRAF = requestAnimationFrame(() => {
+      filmstripScrollRAF = null;
+      renderFilmstripWindowed(false);
+    });
+  });
 
   // reveal the tray once the cursor drops below the drawing window's own
   // screen rect (or is already resting over the tray itself); hide it again
@@ -1123,7 +1951,7 @@
   let filmVisible = false, filmHideTimer = null;
   function updateFilmstripVisibility(clientX, clientY, target){
     const overTray = !!(target && target.closest && target.closest('#filmstrip'));
-    const r = frameBox.getBoundingClientRect();
+    const r = getFrameBoxRect();
     const belowFrame = clientY > r.bottom - 8 && clientX > r.left - 40 && clientX < r.right + 40;
     const show = overTray || belowFrame;
     if(show){
@@ -1140,8 +1968,8 @@
   // the canvas through pan/zoom/resize instead of sitting at a fixed
   // viewport position
   function positionFilmstrip(){
-    const r = frameBox.getBoundingClientRect();
-    const sr = stage.getBoundingClientRect();
+    const r = getFrameBoxRect();
+    const sr = getStageRect();
     filmstripEl.style.left = (r.left - sr.left) + 'px';
     filmstripEl.style.top = (r.bottom - sr.top + TRAY_GAP) + 'px';
     filmstripEl.style.width = r.width + 'px';
@@ -1178,7 +2006,7 @@
   function renderLayerRail(){
     layerTrack.innerHTML = '';
     const GAP = 8;
-    const availH = frameBox.getBoundingClientRect().height;
+    const availH = getFrameBoxRect().height;
     const sc = scenes[activeScene];
     // The rail's normal circle size isn't a guess — it's exactly what the
     // OLD per-height formula used to compute LIVE, evaluated once at this
@@ -1192,7 +2020,7 @@
     // pad up to VISIBLE_COUNT_LAYERS when there are few real layers, so
     // the rail doesn't look sparse. This target doesn't depend on availH.
     const wantCount = Math.max(VISIBLE_COUNT_LAYERS, sc.layers.length+2);
-    let td = LAYER_D; // fixed size, unless the shrink branch below kicks in
+    let td = LAYER_D; // fixed size, ALWAYS — the rail scrolls when there isn't enough height
     let count = wantCount;
     const neededForWant = wantCount*td + (wantCount-1)*GAP;
     if(availH >= neededForWant){
@@ -1201,15 +2029,6 @@
       // slack. This is the tall/portrait-frame case from the original ask.
       const fitCount = Math.floor((availH+GAP)/(td+GAP));
       count = Math.max(wantCount, fitCount);
-    } else {
-      // NOT enough height for wantCount circles at the fixed size — the
-      // short/very-wide-frame case (e.g. 2.39:1). Previously td stayed
-      // fixed here and the rail's own overflow silently cropped the last
-      // circle. Instead, shrink every circle just enough that all
-      // wantCount of them fit with nothing cut off or hanging past the
-      // edge (floored at LAYER_D_MIN; past that the rail falls back to
-      // its existing scroll + fade, same as the filmstrip uses).
-      td = Math.max(LAYER_D_MIN, (availH - GAP*(wantCount-1)) / wantCount);
     }
     // Exactly mirrors the filmstrip's own sceneStart=1 approach: ONE
     // fixed leading "add" slot (here: add-above) and never more, so the
@@ -1233,9 +2052,9 @@
     // whether we grew past the wantCount baseline. Growing (the branch
     // above) is deliberately computed so everything still fits — a taller
     // frame legitimately ending up with 6, 8, however many circles is not
-    // overflow, so it must not fade. Only the rare case where even
-    // LAYER_D_MIN couldn't shrink enough (see the else branch above)
-    // produces genuine overflow, and that's what this should catch.
+    // overflow, so it must not fade. Circles are a FIXED size, so genuine
+    // overflow = more/larger layers than fit at 65.6px, and the rail
+    // scrolls (overflow-y:auto) with the fade hinting at the overflow.
     const contentH = count*td + (count-1)*GAP;
     layerTrack.style.setProperty('--fade', (contentH > availH + 0.5 ? LAYER_FADE_PX : 0)+'px');
     const r = frame; // every layer in this scene shares this one frame
@@ -1275,10 +2094,10 @@
       // size, or the shared frame's geometry actually changed since the
       // last time it was painted.
       let cache = layerThumbCache.get(layer);
-      if(!cache || cache.version!==layer.inkVersion || cache.d!==pxD || cache.sig!==sig){
+      if(!cache || cache.version!==layer.inkVersion || cache.d!==pxD || cache.sig!==sig || cache.op!==layer.opacity){
         if(!cache){ cache = { canvas: document.createElement('canvas') }; layerThumbCache.set(layer, cache); }
         cache.canvas.width = pxD; cache.canvas.height = pxD;
-        cache.d = pxD; cache.version = layer.inkVersion; cache.sig = sig;
+        cache.d = pxD; cache.version = layer.inkVersion; cache.sig = sig; cache.op = layer.opacity;
         const tctx = cache.canvas.getContext('2d');
         tctx.scale(2,2);
         // circular clip so content beyond the circle — necessarily
@@ -1305,32 +2124,73 @@
         // destination-out that reaches outside itself, so no scratch/
         // isolate step is needed here the way renderStaticLayers() and
         // the scene thumbnail above both need one.
-        layer.segments.forEach(seg=>{
-          const aIn = inFrameRect(seg.a,r), bIn = inFrameRect(seg.b,r);
-          if(!aIn && !bIn) return;
-          let a=seg.a, b=seg.b;
-          if(!(aIn && bIn)){
-            const exit = aIn ? rectExit(a,b,r) : rectExit(b,a,r);
-            if(aIn) b = exit; else a = exit;
-          }
-          const ma = map(a), mb = map(b);
-          tctx.save();
-          if(seg.erase) tctx.globalCompositeOperation = 'destination-out';
-          tctx.strokeStyle = 'rgba(30,28,24,.88)';
-          tctx.lineWidth = Math.max(0.4, (seg.erase ? 16 : 2.2) * scale);
-          tctx.lineCap = 'round';
-          tctx.beginPath();
-          tctx.moveTo(ma.x,ma.y); tctx.lineTo(mb.x,mb.y);
-          tctx.stroke();
-          tctx.restore();
-        });
+        tctx.globalAlpha = layer.opacity;
+        if(layer.type==='image'){
+          drawImageIntoThumb(tctx, layer, r, map);
+        } else {
+          layer.segments.forEach(seg=>{
+            const aIn = inFrameRect(seg.a,r), bIn = inFrameRect(seg.b,r);
+            if(!aIn && !bIn) return;
+            let a=seg.a, b=seg.b;
+            if(!(aIn && bIn)){
+              const exit = aIn ? rectExit(a,b,r) : rectExit(b,a,r);
+              if(aIn) b = exit; else a = exit;
+            }
+            const ma = map(a), mb = map(b);
+            tctx.save();
+            if(seg.erase) tctx.globalCompositeOperation = 'destination-out';
+            tctx.strokeStyle = 'rgba(30,28,24,.88)';
+            tctx.lineWidth = Math.max(0.4, (seg.erase ? 16 : 2.2) * scale);
+            tctx.lineCap = 'round';
+            tctx.beginPath();
+            tctx.moveTo(ma.x,ma.y); tctx.lineTo(mb.x,mb.y);
+            tctx.stroke();
+            tctx.restore();
+          });
+        tctx.globalAlpha = 1;
+        }
         tctx.restore(); // pop the circular clip
       }
       thumb.getContext('2d').drawImage(cache.canvas, 0, 0);
       thumb.title = 'Слой ' + (layerIdx+1);
       thumb.addEventListener('pointerdown', ev=>{ ev.stopPropagation(); switchLayer(layerIdx); });
-      layerTrack.appendChild(thumb);
-      if(layerIdx===sc.activeLayer) activeEl = thumb;
+      const wrap = document.createElement('div');
+      wrap.className = 'layerThumbWrap';
+      wrap.style.width = td+'px'; wrap.style.height = td+'px';
+      wrap.appendChild(thumb);
+      if(layerIdx===sc.activeLayer){
+        const ring = document.createElementNS('http://www.w3.org/2000/svg','svg');
+        ring.setAttribute('class','layerEyeRing');
+        ring.setAttribute('viewBox','0 0 100 100');
+        const wSvg = (2*100)/td;        // 2 screen px expressed in SVG units
+        const ringR = 50 + wSvg/2;      // inner edge hugs thumbnail (r=50), zero gap
+        ring._r = ringR;                // reused by updateLayerEyeUI() for C
+        const mkRingCircle = ()=>{
+          const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+          c.setAttribute('cx','50'); c.setAttribute('cy','50');
+          c.setAttribute('r',String(ringR)); c.setAttribute('fill','none');
+          c.setAttribute('stroke','rgba(150,255,175,.9)');
+          c.setAttribute('stroke-width',String(wSvg));
+          c.setAttribute('transform','rotate(-90 50 50)'); // 0° at 12:00, grows clockwise
+          return c;
+        };
+        const solidCircle = mkRingCircle();
+        const dashCircle = mkRingCircle();
+        ring.appendChild(solidCircle);
+        ring.appendChild(dashCircle);
+        const pct = document.createElement('div');
+        pct.className = 'layerEyePct';
+        const eye = document.createElement('div');
+        eye.className = 'layerEye';
+        eye.innerHTML = '<svg class="eyeOpen" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eyeClosed" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/><line x1="3" y1="3" x2="21" y2="21"/></svg>';
+        wrap.appendChild(ring);
+        wrap.appendChild(pct);
+        wrap.appendChild(eye);
+        eye.addEventListener('pointerdown', ev=>{ ev.stopPropagation(); beginEyeGesture(ev, layerIdx, eye, thumb, ring, pct); });
+        updateLayerEyeUI(eye, thumb, ring, pct, layer);
+      }
+      layerTrack.appendChild(wrap);
+      if(layerIdx===sc.activeLayer) activeEl = wrap;
     }
     // same hand-computed scroll as the filmstrip's own note above, for
     // the same reason: scrollIntoView() here risks scrolling #stage
@@ -1341,6 +2201,83 @@
       layerTrack.scrollTop = Math.max(0, Math.min(target, maxScroll));
     }
   }
+  // --- layer eye: visibility toggle + opacity drag -----------------------
+  const EYE_MAX_DRAG = 120;
+  function updateLayerEyeUI(eye, thumb, ring, pct, layer){
+    const op = layer.opacity;
+    eye.classList.toggle('off', op===0);
+    const solidCircle = ring.querySelectorAll('circle')[0];
+    const dashCircle  = ring.querySelectorAll('circle')[1];
+    const r = ring._r || 51;
+    const C = 2*Math.PI*r;
+    const t = 1 - op;
+    const DASH = 4, GAP = 4;
+    const dashArcLen  = t*C;
+    const solidArcLen = C - dashArcLen;
+    solidCircle.setAttribute('transform','rotate(-90 50 50)');
+    dashCircle.setAttribute('transform','rotate(-90 50 50)');
+    if(t <= 0){
+      dashCircle.setAttribute('stroke-dasharray','0 '+C);
+    } else {
+      const pairs = Math.floor(dashArcLen/(DASH+GAP));
+      const rem = dashArcLen - pairs*(DASH+GAP);
+      let pat = (DASH+' '+GAP+' ').repeat(pairs);
+      pat += (rem>0 ? rem : 0)+' ';
+      pat += (C - dashArcLen);
+      dashCircle.setAttribute('stroke-dasharray', pat);
+    }
+    if(t >= 1){
+      solidCircle.setAttribute('stroke-dasharray','0 '+C);
+    } else {
+      solidCircle.setAttribute('stroke-dasharray', solidArcLen+' '+dashArcLen);
+      solidCircle.setAttribute('stroke-dashoffset', '-'+dashArcLen);
+    }
+    pct.textContent = Math.round(t*100)+'%';
+  }
+  function beginEyeGesture(ev, layerIdx, eye, thumb, ring, pct){
+    if(gestureInProgress()) return;
+    const layer = scenes[activeScene].layers[layerIdx];
+    const pointerId = ev.pointerId;
+    const startX = ev.clientX;
+    const startOpacity = layer.opacity;
+    let dragging = false;
+    ev.preventDefault();
+    eye.setPointerCapture(pointerId);
+    const apply = op=>{
+      op = Math.max(0, Math.min(1, op));
+      layer.opacity = op;
+      updateLayerEyeUI(eye, thumb, ring, pct, layer);
+      renderStrokes();
+    };
+    const move = mv=>{
+      if(mv.pointerId!==pointerId) return;
+      const dx = mv.clientX - startX;
+      if(!dragging){
+        if(Math.abs(dx) < 4) return;
+        dragging = true;
+        eyeDragging = true;
+        pct.classList.add('show');
+      }
+      if(mv.cancelable) mv.preventDefault();
+      apply(startOpacity - dx / EYE_MAX_DRAG);
+    };
+    const up = ()=>{
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if(!dragging){
+        layer.opacity = layer.opacity > 0 ? 0 : 1;
+        updateLayerEyeUI(eye, thumb, ring, pct, layer);
+      }
+      eyeDragging = false;
+      pct.classList.remove('show');
+      markInkChanged();
+      renderAll();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
   // reveal the rail once the cursor crosses to the right of the drawing
   // window's own screen rect (or is already resting over the rail
   // itself); hide it again after a short grace delay — identical logic
@@ -1349,7 +2286,7 @@
   let railVisible = false, railHideTimer = null;
   function updateLayerRailVisibility(clientX, clientY, target){
     const overRail = !!(target && target.closest && target.closest('#layerRail'));
-    const r = frameBox.getBoundingClientRect();
+    const r = getFrameBoxRect();
     const rightOfFrame = clientX > r.right - 8 && clientY > r.top - 40 && clientY < r.bottom + 40;
     const show = overRail || rightOfFrame;
     if(show){
@@ -1364,8 +2301,8 @@
   // anchors the rail directly right of the drawing window's live
   // on-screen rect, same trick as positionFilmstrip()
   function positionLayerRail(){
-    const r = frameBox.getBoundingClientRect();
-    const sr = stage.getBoundingClientRect();
+    const r = getFrameBoxRect();
+    const sr = getStageRect();
     layerRailEl.style.left = (r.right - sr.left + RAIL_GAP) + 'px';
     layerRailEl.style.top = (r.top - sr.top) + 'px';
     layerRailEl.style.height = r.height + 'px';
@@ -1390,6 +2327,7 @@
     frameBox.style.top = r.y+'px';
     frameBox.style.width = r.w+'px';
     frameBox.style.height = r.h+'px';
+    frameBoxRectCache = null; // just moved/resized it -- the cache above is now stale
     // every caller of positionFrame() needs applyView() right after it
     // anyway (even a frame-shape change still moves where things render
     // on screen) — folding it in here means updateFocus/syncHandles/
@@ -1398,13 +2336,103 @@
     // needing to remember to call both together.
     applyView(coverageChanged);
   }
+  // --- rule-of-thirds grid toggle: button panel at the TOP edge of the
+  // drawing window (same appear-on-hover mechanic as the filmstrip below
+  // and the layer rail to the right). The PANEL follows the cursor; the
+  // GRID (#thirdsGrid) is controlled ONLY by the button — never by hover.
+  const thirdsPanelEl = document.getElementById('thirdsPanel');
+  const thirdsBtnEl = document.getElementById('thirdsBtn');
+  let gridVisible = false;
+  let thirdsPanelVisible = false, thirdsPanelHideTimer = null;
+  function toggleThirdsGrid(){
+    gridVisible = !gridVisible;
+    thirdsGridEl.classList.toggle('visible', gridVisible);
+    thirdsBtnEl.classList.toggle('active', gridVisible);
+  }
+  thirdsBtnEl.addEventListener('click', toggleThirdsGrid);
+const thirdsSaveBtnEl = document.getElementById('thirdsSaveBtn');
+function saveCurrentFrame(){
+  const sc = scenes[activeScene];
+  const r = frameRect();
+  const W = Math.max(1, Math.round(r.w)), H = Math.max(1, Math.round(r.h));
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#f4f2ee';
+  ctx.fillRect(0, 0, W, H);
+  const scratch = document.createElement('canvas');
+  scratch.width = W; scratch.height = H;
+  const sctx = scratch.getContext('2d');
+  const map = pt => ({ x: pt.x - r.x, y: pt.y - r.y });
+  sc.layers.forEach(layer=>{
+    sctx.clearRect(0, 0, W, H);
+    sctx.globalAlpha = layer.opacity;
+    if(layer.type === 'image'){
+      sctx.save();
+      sctx.beginPath();
+      sctx.rect(0, 0, W, H);
+      sctx.clip();
+      sctx.drawImage(layer.img, layer.ix - r.x, layer.iy - r.y, layer.iw, layer.ih);
+      sctx.restore();
+    } else {
+      layer.segments.forEach(seg=>{
+        const aIn = inFrameRect(seg.a, r), bIn = inFrameRect(seg.b, r);
+        if(!aIn && !bIn) return;
+        let a = seg.a, b = seg.b;
+        if(!(aIn && bIn)){
+          const exit = aIn ? rectExit(a, b, r) : rectExit(b, a, r);
+          if(aIn) b = exit; else a = exit;
+        }
+        const ma = map(a), mb = map(b);
+        sctx.save();
+        if(seg.erase) sctx.globalCompositeOperation = 'destination-out';
+        sctx.strokeStyle = 'rgba(30,28,24,.88)';
+        sctx.lineWidth = seg.erase ? 16 : 2.2;
+        sctx.lineCap = 'round'; sctx.lineJoin = 'round';
+        sctx.beginPath();
+        sctx.moveTo(ma.x, ma.y); sctx.lineTo(mb.x, mb.y);
+        sctx.stroke();
+        sctx.restore();
+      });
+    }
+    sctx.globalAlpha = 1;
+    ctx.drawImage(scratch, 0, 0);
+  });
+  const a = document.createElement('a');
+  a.download = 'кадр-' + (activeScene + 1) + '.png';
+  a.href = out.toDataURL('image/png');
+  a.click();
+}
+thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
+  function updateThirdsPanelVisibility(clientX, clientY, target){
+    const overPanel = !!(target && target.closest && target.closest('#thirdsPanel'));
+    const r = getFrameBoxRect();
+    const aboveFrame = clientY < r.top + 8 && clientX > r.left - 40 && clientX < r.right + 40;
+    const show = overPanel || aboveFrame;
+    if(show){
+      if(thirdsPanelHideTimer){ clearTimeout(thirdsPanelHideTimer); thirdsPanelHideTimer = null; }
+      if(!thirdsPanelVisible){ thirdsPanelVisible = true; thirdsPanelEl.classList.add('visible'); }
+    } else if(thirdsPanelVisible && !thirdsPanelHideTimer){
+      thirdsPanelHideTimer = setTimeout(()=>{
+        thirdsPanelVisible = false; thirdsPanelEl.classList.remove('visible'); thirdsPanelHideTimer = null;
+      }, 300);
+    }
+  }
+  function positionThirdsPanel(){
+    const r = getFrameBoxRect();
+    const sr = getStageRect();
+    const ph = thirdsBtnEl.offsetHeight || 38;
+    thirdsPanelEl.style.left = (r.left - sr.left) + 'px';
+    thirdsPanelEl.style.top = (r.top - sr.top - ph - TRAY_GAP) + 'px';
+    thirdsPanelEl.style.width = r.width + 'px';
+  }
   // ratioTag lives outside #world (see markup), so its own size (font,
   // padding, border-radius) stays fixed on screen regardless of camera
   // zoom — same trick as focusRing/handles. Position is derived from
   // frameBox's live screen rect, anchored just above its top-left corner.
   function positionRatioTag(){
-    const r = frameBox.getBoundingClientRect();
-    const sr = stage.getBoundingClientRect();
+    const r = getFrameBoxRect();
+    const sr = getStageRect();
     ratioTag.style.left = (r.left - sr.left - 4)+'px';
     ratioTag.style.top = (r.top - sr.top - 30)+'px';
   }
@@ -1412,14 +2440,141 @@
   // stays fixed regardless of camera zoom — same trick as focusRing.
   // Position is derived from frameBox's live screen rect each time.
   function syncHandles(){
-    const r = frameBox.getBoundingClientRect();
-    const sr = stage.getBoundingClientRect();
+    const r = getFrameBoxRect();
+    const sr = getStageRect();
     const corners = { tl:[r.left,r.top], tr:[r.right,r.top], bl:[r.left,r.bottom], br:[r.right,r.bottom] };
     Object.keys(corners).forEach(c=>{
       const el = document.querySelector('.handleZone.'+c);
       el.style.left = (corners[c][0]-sr.left)+'px';
       el.style.top = (corners[c][1]-sr.top)+'px';
     });
+  }
+  // Same idea as syncHandles() above, but tracking the ACTIVE IMAGE
+  // LAYER's own world-space rect (layer.ix/iy/iw/ih) instead of the
+  // frame's -- shown only while that layer's type is 'image'. #world's
+  // own live screen rect (post transform: translate+scale already
+  // baked in by the browser) gives the world->screen mapping directly:
+  // world point (wx,wy) projects to (wr.left+wx*viewZoom,
+  // wr.top+wy*viewZoom), the exact inverse of toWorld() below.
+  // Called both right after a layer switch (loadLayer -> 
+  // updateActiveLayerUI, camera unchanged, so this alone is enough) and
+  // from every applyView() (camera/frame changed, frameBox-independent
+  // so it needs its own explicit refresh rather than piggybacking on
+  // syncHandles()).
+  function syncImageHandles(){
+    const sc = scenes[activeScene];
+    const layer = sc.layers[sc.activeLayer];
+    if(layer.type!=='image'){
+      Object.values(imgHandleEls).forEach(el=>{ el.style.display='none'; });
+      return;
+    }
+    const wr = world.getBoundingClientRect();
+    const sr = getStageRect();
+    const corners = {
+      tl:[layer.ix, layer.iy], tr:[layer.ix+layer.iw, layer.iy],
+      bl:[layer.ix, layer.iy+layer.ih], br:[layer.ix+layer.iw, layer.iy+layer.ih]
+    };
+    Object.keys(corners).forEach(c=>{
+      const [wx,wy] = corners[c];
+      const el = imgHandleEls[c];
+      el.style.left = (wr.left + wx*viewZoom - sr.left)+'px';
+      el.style.top = (wr.top + wy*viewZoom - sr.top)+'px';
+      el.style.display = 'flex';
+    });
+  }
+  // Same trick again for the SELECTED REFERENCE's own corners. Simpler
+  // than syncImageHandles above: a reference's x/y/w/h are already raw
+  // world coordinates with nothing else layered on top -- unlike an
+  // image LAYER's ix/iy (which live inside the ink canvas buffers and so
+  // need the canvasOriginX/Y offset subtracted), a reference is a plain
+  // DOM element positioned directly in world px, so the same
+  // world->screen projection applies with no extra offset term.
+  function syncRefHandles(){
+    if(!selectedRef){
+      Object.values(refHandleEls).forEach(el=>{ el.style.display='none'; });
+      return;
+    }
+    const wr = world.getBoundingClientRect();
+    const sr = getStageRect();
+    const r = selectedRef;
+    const corners = {
+      tl:[r.x, r.y], tr:[r.x+r.w, r.y],
+      bl:[r.x, r.y+r.h], br:[r.x+r.w, r.y+r.h]
+    };
+    Object.keys(corners).forEach(c=>{
+      const [wx,wy] = corners[c];
+      const el = refHandleEls[c];
+      el.style.left = (wr.left + wx*viewZoom - sr.left)+'px';
+      el.style.top = (wr.top + wy*viewZoom - sr.top)+'px';
+      el.style.display = 'flex';
+    });
+  }
+  // Shared world(px)->on-stage(px) projection. Every overlay that lives
+  // OUTSIDE #world (frame handles, image/ref handles, these delete
+  // buttons) needs its screen position recomputed by hand instead of
+  // getting it for free from #world's own CSS transform -- this is that
+  // one conversion, factored out for the two delete buttons below rather
+  // than copied a 5th and 6th time (syncImageHandles/syncRefHandles
+  // above keep their own inlined copies un-touched to avoid disturbing
+  // already-tested code for a pure refactor).
+  function worldToStage(wx, wy){
+    const wr = world.getBoundingClientRect();
+    const sr = getStageRect();
+    return { x: wr.left + wx*viewZoom - sr.left, y: wr.top + wy*viewZoom - sr.top };
+  }
+  // Positions the "delete this picture" button just above the active
+  // image layer's own top-right corner -- offset up and away from the
+  // resize handle that already lives exactly at that corner, so they're
+  // two clearly separate tap targets instead of overlapping.
+  function syncImgDeleteBtn(){
+    const sc = scenes[activeScene];
+    const layer = sc.layers[sc.activeLayer];
+    const btn = document.getElementById('imgDeleteBtn');
+    if(layer.type!=='image'){ btn.style.display='none'; return; }
+    const p = worldToStage(layer.ix+layer.iw, layer.iy);
+    btn.style.left = p.x+'px';
+    btn.style.top = (p.y-30)+'px';
+    btn.style.display = 'flex';
+  }
+  // Same idea for the selected reference.
+  function syncRefDeleteBtn(){
+    const btn = document.getElementById('refDeleteBtn');
+    if(!selectedRef){ btn.style.display='none'; return; }
+    const p = worldToStage(selectedRef.x+selectedRef.w, selectedRef.y);
+    btn.style.left = p.x+'px';
+    btn.style.top = (p.y-30)+'px';
+    btn.style.display = 'flex';
+  }
+  // Removes a reference outright (as opposed to promoteRefToLayer, which
+  // also removes it from references[] but hands it on to become a
+  // layer) -- used only by the delete button.
+  function deleteReference(ref){
+    references = references.filter(r=>r!==ref);
+    ref.el.remove();
+    if(selectedRef===ref){ selectedRef=null; syncRefHandles(); syncRefDeleteBtn(); }
+  }
+  // Drawing tools work on any active layer now -- see
+  // ensureDrawableActiveLayer, called from pen/eraser/moveBtn themselves
+  // right when the user reaches for one of them while on an image layer.
+  // Undo/redo are handled separately (updateHistoryButtons, called right
+  // before this in loadLayer): an image layer's history/future are
+  // permanently empty arrays (see placeImageAsLayer), so those two
+  // buttons already end up disabled on their own with no extra check
+  // needed here.
+  function updateActiveLayerUI(){
+    const sc = scenes[activeScene];
+    const layer = sc.layers[sc.activeLayer];
+    const isImg = layer.type==='image';
+    // pen/eraser/move-ink are NEVER disabled here, image layer or not --
+    // reaching for any of them while on an image layer instead auto-
+    // creates a fresh ink layer above it (ensureDrawableActiveLayer, see
+    // their own click/pointerdown handlers), so there's no dead end.
+    // "Clear" has no sensible meaning without ink to clear (and must
+    // never be read as "delete this picture" -- that's the separate,
+    // explicit delete button below), so it alone stays disabled here.
+    document.getElementById('clearBtn').disabled = isImg;
+    syncImageHandles();
+    syncImgDeleteBtn();
   }
 
   function strokeSeg(ctx, a, b, opts){
@@ -1567,6 +2722,8 @@
       markInkChanged();
       const r = frameRect();
       const aIn = inFrameRect(last, r), bIn = inFrameRect(p, r);
+      const alpha = scenes[activeScene].layers[scenes[activeScene].activeLayer].opacity;
+      fctx.globalAlpha = nctx.globalAlpha = alpha;
       if(aIn && bIn){
         strokeSeg(fctx, last, p, BLACK_OPTS(erase));
       } else if(!aIn && !bIn){
@@ -1577,6 +2734,7 @@
         strokeSeg(fctx, inPt, exit, BLACK_OPTS(erase));
         strokeSeg(nctx, exit, outPt, WHITE_OPTS(erase));
       }
+      fctx.globalAlpha = nctx.globalAlpha = 1;
     }
     last = p;
   }
@@ -1586,12 +2744,96 @@
     return { x: (clientX - r.left)/viewZoom, y: (clientY - r.top)/viewZoom };
   }
 
+  // Drags the ACTIVE IMAGE LAYER's own picture (translate only -- see the
+  // 4 imgHandleZone corners further below for scale). Mirrors moveBtn's
+  // ink-move gesture: live viewZoom throughout is safe here for the same
+  // reason it is there (this never changes viewZoom itself, so there's no
+  // feedback loop to freeze against). Unlike moveBtn, this starts directly
+  // from a pointerdown on the frame (see the stage handler below) rather
+  // than a dedicated toolbar button, since with drawing disabled on an
+  // image layer a plain click-drag on the picture has nothing else it
+  // could mean.
+  function startImageDrag(e){
+    const sc = scenes[activeScene];
+    const layer = sc.layers[sc.activeLayer];
+    imageDragging = true;
+    let last = { x:e.clientX, y:e.clientY };
+    stage.setPointerCapture(e.pointerId);
+    const move = ev=>{
+      const dx = (ev.clientX-last.x)/viewZoom, dy = (ev.clientY-last.y)/viewZoom;
+      last = { x:ev.clientX, y:ev.clientY };
+      layer.ix += dx; layer.iy += dy;
+      bumpImageLayer(sc, layer);
+      renderStrokes();
+      syncImageHandles();
+      syncImgDeleteBtn();
+      scheduleHeavyRerender();
+    };
+    const up = ()=>{
+      imageDragging = false;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      renderAll();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+  // Drags a reference around the open canvas; releasing over the frame
+  // promotes it (see promoteRefToLayer). Selecting happens on the same
+  // pointerdown a drag would start from (a plain click with no movement
+  // still counts as a press-then-release in place, so it selects without
+  // needing a separate click handler).
+  function startRefDrag(refEl, e){
+    const id = Number(refEl.dataset.refId);
+    const ref = references.find(r=>r.id===id);
+    if(!ref) return;
+    selectRef(ref);
+    refDragging = true;
+    let last = { x:e.clientX, y:e.clientY };
+    refEl.classList.add('dragging');
+    refEl.setPointerCapture(e.pointerId);
+    const move = ev=>{
+      const dx = (ev.clientX-last.x)/viewZoom, dy = (ev.clientY-last.y)/viewZoom;
+      last = { x:ev.clientX, y:ev.clientY };
+      ref.x += dx; ref.y += dy;
+      refEl.style.left = ref.x+'px';
+      refEl.style.top = ref.y+'px';
+      syncRefHandles();
+      syncRefDeleteBtn();
+    };
+    const up = ev=>{
+      refDragging = false;
+      refEl.classList.remove('dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if(isPointOnFrameScreen(ev.clientX, ev.clientY)) promoteRefToLayer(ref);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
   stage.addEventListener('pointerdown', e=>{
-    if(e.target.closest('#toolbar') || e.target.closest('#zoom') || e.target.closest('.handleZone')) return;
+    if(e.target.closest('#toolbar') || e.target.closest('#zoom') || e.target.closest('.handleZone') || e.target.closest('.imgHandleZone') || e.target.closest('.refHandleZone') || e.target.closest('.pictureDeleteBtn') || e.target.closest('#thirdsPanel')) return;
+    const refEl = e.target.closest('.refItem');
+    if(refEl){ startRefDrag(refEl, e); return; }
+    if(selectedRef) deselectRef();
     if(!focused && isPointOnFrameScreen(e.clientX, e.clientY)){
       recenterView();
       return; // this click brings the window back; it doesn't draw
     }
+    const activeLayerObj = scenes[activeScene].layers[scenes[activeScene].activeLayer];
+    if(activeLayerObj.type==='image'){
+      // drawing is disabled on an image layer -- a click on the frame
+      // grabs the picture instead; a click elsewhere on stage does
+      // nothing (no draw fallback, nothing else it could mean)
+      if(isPointOnFrameScreen(e.clientX, e.clientY)) startImageDrag(e);
+      return;
+    }
+    if(tool==='cursor') return; // cursor tool never draws -- reaching here means the click missed every picture, so there's simply nothing to do
     drawing = true; last = null;
     const p = toWorld(e.clientX, e.clientY);
     draw(p.x, p.y);
@@ -1603,12 +2845,16 @@
       updateHoverAffordance();
       updateFilmstripVisibility(e.clientX, e.clientY, e.target);
       updateLayerRailVisibility(e.clientX, e.clientY, e.target);
+      updateThirdsPanelVisibility(e.clientX, e.clientY, e.target);
       return;
     }
     const p = toWorld(e.clientX, e.clientY);
     draw(p.x, p.y);
   });
   stage.addEventListener('pointerleave', ()=>{
+    if(thirdsPanelVisible && !thirdsPanelHideTimer){
+      thirdsPanelHideTimer = setTimeout(()=>{ thirdsPanelVisible=false; thirdsPanelEl.classList.remove('visible'); thirdsPanelHideTimer=null; }, 300);
+    }
     if(filmVisible && !filmHideTimer){
       filmHideTimer = setTimeout(()=>{ filmVisible=false; filmstripEl.classList.remove('visible'); filmHideTimer=null; }, 300);
     }
@@ -1617,6 +2863,18 @@
     }
   });
   window.addEventListener('pointerup', ()=>{
+    // Guarded on `drawing`: this listener is global (fires on EVERY
+    // pointerup anywhere on the page) specifically so a stroke started on
+    // #stage still commits even if the pointer ends up released outside
+    // it. Without the guard it ALSO ran -- full renderFilmstrip()/
+    // renderLayerRail() cost included -- on every release of moveBtn, an
+    // image-layer drag/resize, a reference drag/resize, or a frame
+    // corner/format drag, every one of which already renders itself at
+    // the end of its own up handler. `drawing` is exclusively true for an
+    // actual stage-started ink stroke (see gestureInProgress()'s comment:
+    // the other gesture flags are deliberately kept separate from it), so
+    // this now only does real work for the one case it's actually for.
+    if(!drawing) return;
     drawing=false; last=null;
     commitStroke();
     renderFilmstrip();
@@ -1625,6 +2883,9 @@
 
   document.querySelectorAll('#toolbar button[data-tool]').forEach(b=>{
     b.addEventListener('click', ()=>{
+      // cursor tool is exempt: it's the one mode meant to grab an active
+      // image layer, so it must NOT jump off it the way pen/eraser do
+      if(b.dataset.tool!=='cursor') ensureDrawableActiveLayer(); // jump off an image layer onto a fresh one above it, if needed
       tool = b.dataset.tool;
       document.querySelectorAll('#toolbar button[data-tool]').forEach(x=>x.classList.toggle('active', x===b));
       // the pencil doubles as a "find the window" control: clicking it
@@ -1664,6 +2925,7 @@
   const moveBtn = document.getElementById('moveBtn');
   moveBtn.addEventListener('pointerdown', e=>{
     e.preventDefault();
+    ensureDrawableActiveLayer(); // jump off an image layer onto a fresh one above it, if needed
     // Deliberately does NOT auto-recenter and proceed — that would move
     // the camera as a surprise side effect of a press meant to move ink,
     // and the user would be dragging blind for however long the spring-
@@ -1727,6 +2989,9 @@
     // translate is listed first so it moves the already-scaled element by
     // raw screen pixels — panning feels the same regardless of zoom level
     world.style.transform = `translate(${panX}px, ${panY}px) scale(${viewZoom})`;
+    // frameBox is a child of #world -- its own style didn't change, but
+    // this transform just moved its effective screen position
+    frameBoxRectCache = null;
     // panning/zooming is normally a free CSS transform (GPU-cheap, no
     // redraw) — only touch the canvas buffer when the visible area is
     // about to outgrow it. positionFrame() already computed this answer
@@ -1740,8 +3005,13 @@
     updateFocus();
     positionRatioTag();
     syncHandles();
+    syncImageHandles();
+    syncRefHandles();
+    syncImgDeleteBtn();
+    syncRefDeleteBtn();
     positionFilmstrip();
     positionLayerRail();
+    positionThirdsPanel();
   }
   document.getElementById('zIn').addEventListener('click', ()=>{ zoomMultiplier = Math.min(zoomMultiplier*1.15, 4); updateZoom(); applyView(); });
   document.getElementById('zOut').addEventListener('click', ()=>{ zoomMultiplier = Math.max(zoomMultiplier/1.15, 0.25); updateZoom(); applyView(); });
@@ -1798,6 +3068,20 @@
     zone.addEventListener('pointerdown', e=>{
       e.stopPropagation();
       cornerDragging = true;
+      // Cancels any elastic settle still easing from a PRIOR format-handle
+      // (tlZone) drag -- same cancellation loadView() already does on a
+      // scene switch, needed here for the same reason: elasticTick() keeps
+      // writing frame.w/h/x/y on every animation frame for up to ~a few
+      // hundred ms AFTER that gesture's own pointerup, purely by its own
+      // still-running requestAnimationFrame loop, with nothing about
+      // GRABBING A DIFFERENT corner naturally stopping it. Without this,
+      // starting a plain resize here while that's still in flight meant
+      // both this drag's own direct frame.w/h writes below AND the old
+      // gesture's easing wrote to the same frame object on the same
+      // frames -- the box visibly fighting itself between two targets
+      // until the old gesture's settle-detector setInterval finally
+      // caught up and stopped it on its own.
+      elastic.active = false;
       updateHoverAffordance();
       const startX=e.clientX, startY=e.clientY;
       const startW=frame.w, startH=frame.h;
@@ -1826,13 +3110,151 @@
         cornerDragging=false;
         lastCX=ev.clientX; lastCY=ev.clientY;
         updateHoverAffordance();
-        window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);
+        window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',up);
         renderAll(); // guarantee one full, untimed pass — the gesture may have ended on a throttled/coalesced frame
       };
       window.addEventListener('pointermove',move);
       window.addEventListener('pointerup',up);
+      window.addEventListener('pointercancel',up);
       zone.setPointerCapture(e.pointerId);
     });
+  });
+
+  // Scale handles for the ACTIVE IMAGE LAYER's own picture (not the
+  // frame) — all 4 corners behave the same way here (plain aspect-
+  // preserving resize anchored at the opposite corner); unlike the
+  // frame's own handles there's no special top-left "change format"
+  // corner, since a photo doesn't have a format to snap to. Reuses the
+  // exact same delta/anchor math as RESIZE_CORNERS above, just applied to
+  // layer.ix/iy/iw/ih instead of frame.x/y/w/h, plus one addition: newW
+  // is capped at the layer's own natW (loadAndCompressImage/
+  // placeImageAsLayer both guarantee iw<=natW already, so this only ever
+  // bites once the user actually drags past 100% -- see the brief:
+  // "if a small picture was dropped, that's on the user, it never
+  // upscales beyond its own resolution"). No startZoom-freezing needed
+  // here the way the frame's own resize needs it: dragging this never
+  // touches viewZoom itself, so there's no feedback loop to guard
+  // against (same reasoning moveBtn's own ink-drag comment gives for
+  // using the live value).
+  const IMG_RESIZE_CORNERS = { tl:{x:-1,y:-1}, tr:{x:1,y:-1}, bl:{x:-1,y:1}, br:{x:1,y:1} };
+  Object.keys(IMG_RESIZE_CORNERS).forEach(corner=>{
+    const zone = imgHandleEls[corner];
+    const sign = IMG_RESIZE_CORNERS[corner];
+    zone.addEventListener('pointerdown', e=>{
+      e.stopPropagation();
+      const sc = scenes[activeScene];
+      const layer = sc.layers[sc.activeLayer];
+      if(layer.type!=='image') return;
+      imageDragging = true;
+      const startX=e.clientX, startY=e.clientY;
+      const startW=layer.iw, startH=layer.ih;
+      const aspect = startW/startH;
+      // opposite corner from the one being dragged, fixed in world space
+      // for the whole gesture -- resizing pivots around it
+      const anchor = {
+        x: sign.x>0 ? layer.ix : layer.ix+layer.iw,
+        y: sign.y>0 ? layer.iy : layer.iy+layer.ih
+      };
+      const move=(ev)=>{
+        const dx=(ev.clientX-startX)/viewZoom, dy=(ev.clientY-startY)/viewZoom;
+        const delta = (dx*sign.x + dy*sign.y)/2;
+        let newW = Math.max(20, startW + delta*2);
+        newW = Math.min(newW, layer.natW); // never upscale past native resolution
+        const newH = newW/aspect;
+        layer.iw = newW; layer.ih = newH;
+        layer.ix = sign.x>0 ? anchor.x : anchor.x-newW;
+        layer.iy = sign.y>0 ? anchor.y : anchor.y-newH;
+        bumpImageLayer(sc, layer);
+        renderStrokes();
+        syncImageHandles();
+        syncImgDeleteBtn();
+        scheduleHeavyRerender();
+      };
+      const up=()=>{
+        imageDragging = false;
+        window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); window.removeEventListener('pointercancel',up);
+        renderAll();
+      };
+      window.addEventListener('pointermove',move);
+      window.addEventListener('pointerup',up);
+      window.addEventListener('pointercancel',up);
+      zone.setPointerCapture(e.pointerId);
+    });
+  });
+
+  // Scale handles for the SELECTED REFERENCE -- same aspect-preserving,
+  // opposite-corner-anchored math as IMG_RESIZE_CORNERS just above (same
+  // natW cap: never upscale past the reference's own compressed
+  // resolution, "small picture was your own problem" per the brief), the
+  // one real difference being WHAT gets updated on every move tick: an
+  // image layer is redrawn into a canvas (renderStrokes()), but a
+  // reference IS a DOM element, so its own CSS left/top/width/height are
+  // written directly instead.
+  const REF_RESIZE_CORNERS = { tl:{x:-1,y:-1}, tr:{x:1,y:-1}, bl:{x:-1,y:1}, br:{x:1,y:1} };
+  Object.keys(REF_RESIZE_CORNERS).forEach(corner=>{
+    const zone = refHandleEls[corner];
+    const sign = REF_RESIZE_CORNERS[corner];
+    zone.addEventListener('pointerdown', e=>{
+      e.stopPropagation();
+      const ref = selectedRef;
+      if(!ref) return;
+      refDragging = true;
+      const startX=e.clientX, startY=e.clientY;
+      const startW=ref.w, startH=ref.h;
+      const aspect = startW/startH;
+      const anchor = {
+        x: sign.x>0 ? ref.x : ref.x+ref.w,
+        y: sign.y>0 ? ref.y : ref.y+ref.h
+      };
+      const move=(ev)=>{
+        const dx=(ev.clientX-startX)/viewZoom, dy=(ev.clientY-startY)/viewZoom;
+        const delta = (dx*sign.x + dy*sign.y)/2;
+        let newW = Math.max(20, startW + delta*2);
+        newW = Math.min(newW, ref.natW); // never upscale past native resolution
+        const newH = newW/aspect;
+        ref.w = newW; ref.h = newH;
+        ref.x = sign.x>0 ? anchor.x : anchor.x-newW;
+        ref.y = sign.y>0 ? anchor.y : anchor.y-newH;
+        ref.el.style.left = ref.x+'px'; ref.el.style.top = ref.y+'px';
+        ref.el.style.width = ref.w+'px'; ref.el.style.height = ref.h+'px';
+        syncRefHandles();
+        syncRefDeleteBtn();
+      };
+      const up=()=>{
+        refDragging = false;
+        window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); window.removeEventListener('pointercancel',up);
+      };
+      window.addEventListener('pointermove',move);
+      window.addEventListener('pointerup',up);
+      window.addEventListener('pointercancel',up);
+      zone.setPointerCapture(e.pointerId);
+    });
+  });
+
+  document.getElementById('imgDeleteBtn').addEventListener('click', e=>{
+    e.stopPropagation();
+    deleteImageLayer(activeScene, scenes[activeScene].activeLayer);
+  });
+  document.getElementById('refDeleteBtn').addEventListener('click', e=>{
+    e.stopPropagation();
+    if(selectedRef) deleteReference(selectedRef);
+  });
+
+  // --- dropping image files: onto the frame = a new picture layer,
+  // onto the open gray canvas around it = a free-floating reference ---
+  stage.addEventListener('dragover', e=>{ e.preventDefault(); });
+  stage.addEventListener('drop', e=>{
+    e.preventDefault();
+    if(e.target.closest('#toolbar,#zoom,#filmstrip,#layerRail,#thirdsPanel')) return;
+    const files = e.dataTransfer && e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+    const file = files.find(f=>f.type && f.type.startsWith('image/'));
+    if(!file) return;
+    const p = toWorld(e.clientX, e.clientY);
+    const dropOnFrame = inFrameRect(p, frameRect());
+    loadAndCompressImage(file).then(({img,natW,natH})=>{
+      if(dropOnFrame) placeImageAsLayer(img, natW, natH);
+      else placeReference(img, natW, natH, p);
+    }).catch(()=>{ /* unreadable file (corrupt/unsupported) -- silently ignored, same as a miss on files.find above */ });
   });
 
   // top-left corner: changes the FORMAT (aspect ratio) to the nearest standard preset,
@@ -1883,6 +3305,7 @@
       updateHoverAffordance();
       window.removeEventListener('pointermove',move);
       window.removeEventListener('pointerup',up);
+      window.removeEventListener('pointercancel',up);
       // fade the label out once it's basically settled (or stop polling
       // outright if a scene switch already cancelled this gesture — after
       // that, `frame` may refer to a different scene entirely, so this
@@ -1896,6 +3319,7 @@
     };
     window.addEventListener('pointermove',move);
     window.addEventListener('pointerup',up);
+    window.addEventListener('pointercancel',up);
     tlZone.setPointerCapture(e.pointerId);
   });
 

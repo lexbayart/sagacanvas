@@ -24,6 +24,9 @@ It's still early and in active development. The core frame interaction is worked
 - **Frame as viewport** — an infinitely visible drawing window on an unbounded surface; ink inside is black, ink outside is white, nothing is ever deleted
 - **Scenes / storyboard** — multiple shots, each with its own frame position, size, format and camera; the bottom filmstrip adds scenes (after or before) and switches between them
 - **Layers** — unlimited layers per scene; add above or below, switch from the right-hand rail; erasing is layer-safe and never eats into another layer's ink
+- **Layer transparency** — drag a layer's eye to fade it in and out; the gesture starts from the layer's *current* opacity and continues from there, so you can resume adjusting from any level it's already at
+- **Transparency ring** — a green status outline around the active layer thumbnail: solid at 0% opacity, then a dashed progress indicator that grows clockwise from 12 o'clock up to 100% transparency
+- **Zero-gap outline** — the status ring hugs the layer thumbnail tightly with no gap, so it reads as the thumbnail's own border
 - **Undo / Redo** — full history per layer; each step undoes one stroke or one clear
 - **Move tool** — press-and-hold the move button and drag anywhere: the drawing itself shifts under your cursor, not just the camera
 - **Pen and eraser** — two tools, switchable from the toolbar
