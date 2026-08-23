@@ -5,7 +5,7 @@
 <title>Холст</title>
 <style>
   html,body{margin:0;height:100%;background:#050505;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
-  #stage{position:relative;width:100vw;height:100vh;background:radial-gradient(ellipse at 50% 42%, #32353a 0%, #24262a 32%, #16181c 62%, #0d0f11 100%);overflow:hidden;touch-action:none;}
+  #stage{position:relative;width:100vw;height:100vh;background-image:linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px), radial-gradient(ellipse at 50% 42%, #32353a 0%, #24262a 32%, #16181c 62%, #0d0f11 100%); background-size: 40px 40px, 40px 40px, 100% 100%; overflow:hidden;touch-action:none;}
   #world{position:absolute;transform-origin:50% 50%;}
   /* pointer-events:none is required, not cosmetic: these 7 canvases are
      resized by ensureCanvasCoverage() to blanket the ENTIRE visible
@@ -212,23 +212,32 @@
   #thirdsBtn,#thirdsSaveBtn{width:38px;height:38px;border-radius:9px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:rgba(255,255,255,.55);cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;transition:background .15s ease, color .15s ease;}
   #thirdsBtn:hover,#thirdsSaveBtn:hover{background:rgba(255,255,255,.14);color:#fff;}
   #thirdsBtn.active{background:rgba(255,255,255,.14);color:#fff;}
+   /* boundary snap highlight: green edge glow shown while a picture or
+      reference is dragged/resized flush against the frame's own edge */
+   #frameSnapOverlay{position:absolute;inset:0;pointer-events:none;border-radius:var(--corner-r,0px);overflow:hidden;z-index:2;}
+   .snap-edge{position:absolute;background:rgba(150,255,175,0.95);box-shadow:0 0 12px 2px rgba(150,255,175,0.75);opacity:0;transition:opacity 0.08s ease;will-change:opacity;transform:translateZ(0);}
+   .snap-edge.top{top:0;left:0;right:0;height:3px;}
+   .snap-edge.bottom{bottom:0;left:0;right:0;height:3px;}
+   .snap-edge.left{top:0;bottom:0;left:0;width:3px;}
+   .snap-edge.right{top:0;bottom:0;right:0;width:3px;}
+   .snap-edge.active{opacity:1;}
 </style>
 </head>
 <body>
 <div id="stage">
+  <canvas id="bg"></canvas>
   <div id="world">
-    <canvas id="bg"></canvas>
     <div id="refLayer"></div>
-    <canvas id="ghost"></canvas>
-    <canvas id="notesBelow"></canvas>
-    <canvas id="notes"></canvas>
-    <canvas id="notesAbove"></canvas>
-    <div class="frame" id="frameBox"><div id="thirdsGrid"><div class="hline" style="top:33.333%"></div><div class="hline" style="top:66.666%"></div></div></div>
-    <canvas id="frontBelow"></canvas>
-    <canvas id="front"></canvas>
-    <canvas id="frontAbove"></canvas>
+    <div class="frame" id="frameBox"><div id="thirdsGrid"><div class="hline" style="top:33.333%"></div><div class="hline" style="top:66.666%"></div></div><div id="frameSnapOverlay"><div class="snap-edge top" id="snapEdgeTop"></div><div class="snap-edge bottom" id="snapEdgeBottom"></div><div class="snap-edge left" id="snapEdgeLeft"></div><div class="snap-edge right" id="snapEdgeRight"></div></div></div>
     <div id="layerRail"><div id="layerTrack"></div></div>
   </div>
+  <canvas id="ghost"></canvas>
+  <canvas id="notesBelow"></canvas>
+  <canvas id="notes"></canvas>
+  <canvas id="notesAbove"></canvas>
+  <canvas id="frontBelow"></canvas>
+  <canvas id="front"></canvas>
+  <canvas id="frontAbove"></canvas>
   <div class="ratioTag" id="ratioTag"></div>
   <div id="focusRing"></div>
   <div class="handleZone tl" data-corner="tl"><div class="handle"></div></div>
@@ -415,7 +424,7 @@
   const ratioTag = document.getElementById('ratioTag');
   const penBtn = document.querySelector('#toolbar button[data-tool="pen"]');
 
-  let DPR = Math.min(window.devicePixelRatio || 1, 2);
+  let DPR = Math.min(window.devicePixelRatio || 1, 1.5);
   // shifts the whole "centered" position up by this many screen px (a
   // raw, zoom-independent offset — same units panX/panY already use),
   // trading some of the empty margin above the canvas for more breathing
@@ -699,6 +708,7 @@
     panTarget = null;
     elastic.active = false;
     ratioTag.style.opacity = '0';
+    clearSnapHighlights();
   }
   // Points strokeSegments/history/future at whichever layer is now active
   // in the active scene. Called after loadView() on a scene switch, and
@@ -780,6 +790,7 @@
     saveView();
     activeScene = idx;
     loadView();
+    applyWorldTransform();
     loadLayer();
     last = null;
     positionFrame();
@@ -798,6 +809,7 @@
     scenes.unshift(newSceneData());
     activeScene = 0;
     loadView();
+    applyWorldTransform();
     loadLayer();
     last = null;
     positionFrame();
@@ -987,6 +999,7 @@
     syncRefDeleteBtn();
   }
   function deselectRef(){
+    clearSnapHighlights();
     if(!selectedRef) return;
     selectedRef.el.classList.remove('selected');
     selectedRef = null;
@@ -1001,6 +1014,7 @@
   // than trying to carry over whatever arbitrary size/position it
   // happened to have out on the canvas.
   function promoteRefToLayer(ref){
+    clearSnapHighlights();
     references = references.filter(r=>r!==ref);
     ref.el.remove();
     if(selectedRef===ref){ selectedRef=null; syncRefHandles(); syncRefDeleteBtn(); }
@@ -1156,6 +1170,13 @@
     // canvas sizing itself now happens inside positionFrame() ->
     // ensureCanvasCoverage() below (capped at MAX_CANVAS_DIM), not here.
     updateZoom();
+    // Apply the pan/zoom transform BEFORE the first ensureCanvasCoverage()
+    // runs (inside positionFrame() below): the coverage origins are
+    // derived from #world's transformed box (toWorld -> getBoundingClientRect),
+    // so the initial pan (panY = -effectiveBias()) must already be live,
+    // or the very first buffer allocation — and every stroke drawn until
+    // the next realloc — lands offset from the cursor/frame.
+    applyWorldTransform();
     positionFrame();
     // positionFrame() now calls applyView() internally (see its
     // definition) — this comment stays here as a pointer for anyone who
@@ -1170,41 +1191,39 @@
     return { x:frame.x, y:frame.y, w:frame.w, h:frame.h, cx:frame.x+frame.w/2, cy:frame.y+frame.h/2 };
   }
 
-  // Grows/relocates the canvas buffer only when the currently visible
-  // screen area is about to fall outside it — the buffer tracks the camera
-  // instead of trying to pre-cover every coordinate the user could ever
-  // reach. Returns true if it actually resized (caller must then redraw).
-  const COVERAGE_MARGIN = 400, COVERAGE_PAD = 600;
-  // hard ceiling on the canvas bitmap's own size, independent of how far
-  // zoomed out the camera gets. Without this, ensureCanvasCoverage()
-  // sizes the bitmap to match however much world-space is visible on
-  // screen — which grows without bound as viewZoom shrinks (e.g. at
-  // 0.05x on a 1280px-wide view, that's 25,000+ px of canvas before
-  // padding, on EACH of three layers). Measured a 16-second load/freeze
-  // hitting this on an extreme viewport before adding the cap. Ink
-  // outside the capped area simply won't be covered by the bitmap at
-  // such extreme zoom-out — an acceptable tradeoff, since individual
-  // strokes are already near-invisible at that scale anyway.
-  const MAX_CANVAS_DIM = 3000;
+  const COVERAGE_PAD = 400;
   function ensureCanvasCoverage(){
     const tl = toWorld(0,0), br = toWorld(W,H);
     const minX = Math.min(tl.x,br.x), maxX = Math.max(tl.x,br.x);
     const minY = Math.min(tl.y,br.y), maxY = Math.max(tl.y,br.y);
-    if(minX >= canvasOriginX+COVERAGE_MARGIN && maxX <= canvasOriginX+CW-COVERAGE_MARGIN &&
-       minY >= canvasOriginY+COVERAGE_MARGIN && maxY <= canvasOriginY+CH-COVERAGE_MARGIN){
-      return false;
+    // Buffer reallocation (bitmap resize + CSS left/top) is the expensive,
+    // guarded half: only run it when the visible world bounds have
+    // outgrown the current window's padded coverage. canvasOriginX/Y is
+    // live state updated on every call regardless — the transform below
+    // always targets the CURRENT viewport origin.
+    const needRealloc = canvasOriginX === undefined ||
+      minX < canvasOriginX + 50 || maxX > canvasOriginX + CW - 50 ||
+      minY < canvasOriginY + 50 || maxY > canvasOriginY + CH - 50;
+    canvasOriginX = minX; canvasOriginY = minY;
+    if(needRealloc){
+      CW = W + COVERAGE_PAD * 2; CH = H + COVERAGE_PAD * 2;
+      [front, frontBelow, frontAbove, notes, notesBelow, notesAbove, groupScratchF, groupScratchN].forEach(c=>{
+        c.width = CW*DPR; c.height = CH*DPR;
+        c.style.width = CW+'px'; c.style.height = CH+'px';
+        c.style.left = (-COVERAGE_PAD)+'px'; c.style.top = (-COVERAGE_PAD)+'px';
+      });
     }
-    canvasOriginX = minX - COVERAGE_PAD;
-    canvasOriginY = minY - COVERAGE_PAD;
-    CW = Math.max(MAX_CANVAS_DIM, (maxX-minX) + COVERAGE_PAD*2);
-    CH = Math.max(MAX_CANVAS_DIM, (maxY-minY) + COVERAGE_PAD*2);
-    [bg, ghost, front, frontBelow, frontAbove, notes, notesBelow, notesAbove, groupScratchF, groupScratchN].forEach(c=>{
-      c.width = CW*DPR; c.height = CH*DPR;
-      c.style.width = CW+'px'; c.style.height = CH+'px';
-      c.style.left = canvasOriginX+'px'; c.style.top = canvasOriginY+'px';
-      c.getContext('2d').setTransform(DPR,0,0,DPR,0,0);
-    });
-    return true;
+    // The cheap half runs on EVERY call (zoom/pan included), using the
+    // current live viewZoom and live canvasOriginX/Y: rewriting the
+    // world->buffer transform and the CSS clip keeps them from going
+    // stale on zoom/pan events that don't trigger a reallocation.
+    const setT = c => c.getContext('2d').setTransform(
+      viewZoom*DPR, 0, 0, viewZoom*DPR,
+      (-canvasOriginX*viewZoom + COVERAGE_PAD)*DPR,
+      (-canvasOriginY*viewZoom + COVERAGE_PAD)*DPR);
+    [front, frontBelow, frontAbove, notes, notesBelow, notesAbove, groupScratchF, groupScratchN].forEach(setT);
+    updateClipPath();
+    return needRealloc;
   }
 
   // front holds absolute-coordinate content that no longer automatically
@@ -1217,11 +1236,25 @@
   // crosses the boundary at an angle)
   function updateClipPath(){
     const r = frameRect();
-    const bleed = 1;
-    const clip = `inset(${r.y-canvasOriginY-bleed}px ${(canvasOriginX+CW)-(r.x+r.w)-bleed}px ${(canvasOriginY+CH)-(r.y+r.h)-bleed}px ${r.x-canvasOriginX-bleed}px round ${CORNER_R}px)`;
+    const bleed = 0;
+    const leftPx = (r.x - canvasOriginX) * viewZoom + COVERAGE_PAD - bleed;
+    const topPx = (r.y - canvasOriginY) * viewZoom + COVERAGE_PAD - bleed;
+    const rightPx = CW - ((r.x + r.w - canvasOriginX) * viewZoom + COVERAGE_PAD) - bleed;
+    const bottomPx = CH - ((r.y + r.h - canvasOriginY) * viewZoom + COVERAGE_PAD) - bleed;
+    const clip = `inset(${topPx}px ${rightPx}px ${bottomPx}px ${leftPx}px round ${CORNER_R*viewZoom}px)`;
     front.style.clipPath = clip;
     frontBelow.style.clipPath = clip;
     frontAbove.style.clipPath = clip;
+  }
+
+  function clipToFrame(ctx, r, cornerR){
+    ctx.beginPath();
+    if(ctx.roundRect){
+      ctx.roundRect(r.x, r.y, r.w, r.h, cornerR);
+    } else {
+      ctx.rect(r.x, r.y, r.w, r.h);
+    }
+    ctx.clip();
   }
 
   // --- camera focus: is the window near the viewport's center right now? ---
@@ -1318,13 +1351,19 @@
     segs.forEach(seg=>{
       const aIn = inFrameRect(seg.a, r), bIn = inFrameRect(seg.b, r);
       if(aIn && bIn){
+        blackCtx.save();
+        clipToFrame(blackCtx, r, CORNER_R);
         strokeSeg(blackCtx, seg.a, seg.b, BLACK_OPTS(seg.erase));
+        blackCtx.restore();
       } else if(!aIn && !bIn){
         strokeSeg(whiteCtx, seg.a, seg.b, WHITE_OPTS(seg.erase));
       } else {
         const exit = aIn ? rectExit(seg.a, seg.b, r) : rectExit(seg.b, seg.a, r);
         const inPt = aIn ? seg.a : seg.b, outPt = aIn ? seg.b : seg.a;
+        blackCtx.save();
+        clipToFrame(blackCtx, r, CORNER_R);
         strokeSeg(blackCtx, inPt, exit, BLACK_OPTS(seg.erase));
+        blackCtx.restore();
         strokeSeg(whiteCtx, exit, outPt, WHITE_OPTS(seg.erase));
       }
     });
@@ -1363,9 +1402,9 @@
   function drawImageLayerClipped(ctx, layer, r){
     ctx.save();
     ctx.beginPath();
-    ctx.rect(r.x-canvasOriginX-1, r.y-canvasOriginY-1, r.w+2, r.h+2);
+    ctx.rect(r.x-1, r.y-1, r.w+2, r.h+2);
     ctx.clip();
-    ctx.drawImage(layer.img, layer.ix-canvasOriginX, layer.iy-canvasOriginY, layer.iw, layer.ih);
+    ctx.drawImage(layer.img, layer.ix, layer.iy, layer.iw, layer.ih);
     ctx.restore();
   }
   // Flattens every OTHER layer of the active scene (i.e. everything
@@ -1416,7 +1455,7 @@
     // buffers). Runs on every render pass: coverage realloc, resize, zoom,
     // scene/layer switch, undo/redo/clear. Pure pan needs no redraw (the whole
     // buffer, grid included, moves via the CSS transform).
-    drawGrid(bctx, viewZoom, panX, panY, CW, CH);
+    // ponytail: grid now pure CSS — canvas draw disabled
     renderStrokes();
     renderStaticLayers();
     renderFilmstrip();
@@ -2388,7 +2427,9 @@
     // (capped) canvas realloc + renderAll() on the rarer branch where
     // coverage actually needs to grow).
     const coverageChanged = ensureCanvasCoverage();
-    updateClipPath();
+    // updateClipPath() runs inside ensureCanvasCoverage() above, on every
+    // call — not just on realloc — so the CSS clip always tracks the live
+    // canvasOriginX/Y and viewZoom.
     frameBox.style.left = r.x+'px';
     frameBox.style.top = r.y+'px';
     frameBox.style.width = r.w+'px';
@@ -2652,7 +2693,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     ctx.shadowColor = opts.glow || 'transparent';
     ctx.shadowBlur = opts.blur || 0;
     ctx.beginPath();
-    ctx.moveTo(a.x-canvasOriginX,a.y-canvasOriginY); ctx.lineTo(b.x-canvasOriginX,b.y-canvasOriginY);
+    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
     ctx.stroke();
     ctx.restore();
   }
@@ -2791,13 +2832,19 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
       const alpha = scenes[activeScene].layers[scenes[activeScene].activeLayer].opacity;
       fctx.globalAlpha = nctx.globalAlpha = alpha;
       if(aIn && bIn){
+        fctx.save();
+        clipToFrame(fctx, r, CORNER_R);
         strokeSeg(fctx, last, p, BLACK_OPTS(erase));
+        fctx.restore();
       } else if(!aIn && !bIn){
         strokeSeg(nctx, last, p, WHITE_OPTS(erase));
       } else {
         const exit = aIn ? rectExit(last, p, r) : rectExit(p, last, r);
         const inPt = aIn ? last : p, outPt = aIn ? p : last;
+        fctx.save();
+        clipToFrame(fctx, r, CORNER_R);
         strokeSeg(fctx, inPt, exit, BLACK_OPTS(erase));
+        fctx.restore();
         strokeSeg(nctx, exit, outPt, WHITE_OPTS(erase));
       }
       fctx.globalAlpha = nctx.globalAlpha = 1;
@@ -2823,12 +2870,14 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     const sc = scenes[activeScene];
     const layer = sc.layers[sc.activeLayer];
     imageDragging = true;
+    startSnapSession();
     let last = { x:e.clientX, y:e.clientY };
     stage.setPointerCapture(e.pointerId);
     const move = ev=>{
       const dx = (ev.clientX-last.x)/viewZoom, dy = (ev.clientY-last.y)/viewZoom;
       last = { x:ev.clientX, y:ev.clientY };
       layer.ix += dx; layer.iy += dy;
+      checkAndApplySnapHighlights(layer.ix, layer.iy, layer.iw, layer.ih);
       bumpImageLayer(sc, layer);
       renderStrokes();
       syncImageHandles();
@@ -2837,6 +2886,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     };
     const up = ()=>{
       imageDragging = false;
+      clearSnapHighlights();
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
@@ -2857,6 +2907,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     if(!ref) return;
     selectRef(ref);
     refDragging = true;
+    startSnapSession();
     let last = { x:e.clientX, y:e.clientY };
     refEl.classList.add('dragging');
     refEl.setPointerCapture(e.pointerId);
@@ -2864,6 +2915,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
       const dx = (ev.clientX-last.x)/viewZoom, dy = (ev.clientY-last.y)/viewZoom;
       last = { x:ev.clientX, y:ev.clientY };
       ref.x += dx; ref.y += dy;
+      checkAndApplySnapHighlights(ref.x, ref.y, ref.w, ref.h);
       refEl.style.left = ref.x+'px';
       refEl.style.top = ref.y+'px';
       syncRefHandles();
@@ -2871,6 +2923,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     };
     const up = ev=>{
       refDragging = false;
+      clearSnapHighlights();
       refEl.classList.remove('dragging');
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -3044,7 +3097,25 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     window.addEventListener('pointercancel', up);
   });
 
+  // Writes pan/zoom into #world's CSS transform — the single source the
+  // whole world-to-screen mapping flows from (toWorld() derives its
+  // client->world mapping from #world's post-transform bounding box).
+  // Kept as its own helper so resize() can apply it BEFORE the very first
+  // ensureCanvasCoverage() runs: the initial coverage origins come from
+  // that same transformed box, so with the initial pan (panY =
+  // -VERTICAL_BIAS / -effectiveBias()) still not applied, the first
+  // buffer allocation would bake in a pan-less origin and every stroke
+  // drawn before the next realloc would sit offset from the cursor.
+  function applyWorldTransform(){
+    // translate is listed first so it moves the already-scaled element by
+    // raw screen pixels — panning feels the same regardless of zoom level
+    world.style.transform = `translate(${panX}px, ${panY}px) scale(${viewZoom})`;
+    // frameBox is a child of #world -- its own style didn't change, but
+    // this transform just moved its effective screen position
+    frameBoxRectCache = null;
+  }
   function applyView(coverageAlreadyChecked){
+    clearSnapHighlights();
     // the label reflects the user's own deliberate zoom relative to this
     // shot's auto-fit baseline (always "100%" right after a switch,
     // however big or small that shot's own window is) rather than the
@@ -3052,12 +3123,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     // shot read as e.g. "56%" even though its window looks exactly the
     // same size on screen as every other shot's
     zLabel.textContent = Math.round(zoomMultiplier*100)+'%';
-    // translate is listed first so it moves the already-scaled element by
-    // raw screen pixels — panning feels the same regardless of zoom level
-    world.style.transform = `translate(${panX}px, ${panY}px) scale(${viewZoom})`;
-    // frameBox is a child of #world -- its own style didn't change, but
-    // this transform just moved its effective screen position
-    frameBoxRectCache = null;
+    applyWorldTransform();
     // panning/zooming is normally a free CSS transform (GPU-cheap, no
     // redraw) — only touch the canvas buffer when the visible area is
     // about to outgrow it. positionFrame() already computed this answer
@@ -3067,7 +3133,10 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     // checked — the wheel handler, zoom +/- clicks, and the recenter
     // animation's own applyView() call.
     const coverageChanged = coverageAlreadyChecked !== undefined ? coverageAlreadyChecked : ensureCanvasCoverage();
-    if(coverageChanged){ updateClipPath(); renderAll(); }
+    // setTransform + updateClipPath already ran unconditionally inside
+    // ensureCanvasCoverage(); only the full repaint stays gated on an
+    // actual (re)alloc having happened.
+    if(coverageChanged){ renderAll(); }
     updateFocus();
     positionRatioTag();
     syncHandles();
@@ -3120,6 +3189,70 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
     e.stopPropagation();
     if(e.ctrlKey) e.preventDefault();
   }, {passive:false});
+
+  // Boundary snap highlight: green edge glow while a picture or reference is
+  // dragged/resized flush against the frame's own edge. Tracks a compare
+  // mask vs. the previous tick so the DOM only changes when it must.
+  const SNAP_TOP = 1, SNAP_BOTTOM = 2, SNAP_LEFT = 4, SNAP_RIGHT = 8;
+  let activeSnapMask = 0;
+  let snapCachedFrame = null;
+  let snapEdgeEls = null;
+
+  function getSnapEls() {
+    if (!snapEdgeEls) {
+      snapEdgeEls = {
+        top: document.getElementById('snapEdgeTop'),
+        bottom: document.getElementById('snapEdgeBottom'),
+        left: document.getElementById('snapEdgeLeft'),
+        right: document.getElementById('snapEdgeRight')
+      };
+    }
+    return snapEdgeEls;
+  }
+
+  function startSnapSession() {
+    snapCachedFrame = {
+      left: frame.x,
+      right: frame.x + frame.w,
+      top: frame.y,
+      bottom: frame.y + frame.h,
+      tol: 2.0 / Math.max(0.01, viewZoom)
+    };
+  }
+
+  function checkAndApplySnapHighlights(iX, iY, iW, iH) {
+    if (!snapCachedFrame) return;
+    const { left: fL, right: fR, top: fT, bottom: fB, tol } = snapCachedFrame;
+    const iR = iX + iW;
+    const iB = iY + iH;
+
+    let mask = 0;
+    if (Math.abs(iY - fT) <= tol || Math.abs(iY - fB) <= tol) mask |= SNAP_TOP;
+    if (Math.abs(iB - fT) <= tol || Math.abs(iB - fB) <= tol) mask |= SNAP_BOTTOM;
+    if (Math.abs(iX - fL) <= tol || Math.abs(iX - fR) <= tol) mask |= SNAP_LEFT;
+    if (Math.abs(iR - fL) <= tol || Math.abs(iR - fR) <= tol) mask |= SNAP_RIGHT;
+
+    if (mask !== activeSnapMask) {
+      activeSnapMask = mask;
+      const els = getSnapEls();
+      if (els.top) els.top.classList.toggle('active', (mask & SNAP_TOP) !== 0);
+      if (els.bottom) els.bottom.classList.toggle('active', (mask & SNAP_BOTTOM) !== 0);
+      if (els.left) els.left.classList.toggle('active', (mask & SNAP_LEFT) !== 0);
+      if (els.right) els.right.classList.toggle('active', (mask & SNAP_RIGHT) !== 0);
+    }
+  }
+
+  function clearSnapHighlights() {
+    snapCachedFrame = null;
+    if (activeSnapMask !== 0) {
+      activeSnapMask = 0;
+      const els = getSnapEls();
+      if (els.top) els.top.classList.remove('active');
+      if (els.bottom) els.bottom.classList.remove('active');
+      if (els.left) els.left.classList.remove('active');
+      if (els.right) els.right.classList.remove('active');
+    }
+  }
 
   // every corner except top-left resizes the shot's own window,
   // aspect-preserving, anchored at its center. The window's ON-SCREEN
@@ -3212,6 +3345,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
       const layer = sc.layers[sc.activeLayer];
       if(layer.type!=='image') return;
       imageDragging = true;
+      startSnapSession();
       const startX=e.clientX, startY=e.clientY;
       const startW=layer.iw, startH=layer.ih;
       const aspect = startW/startH;
@@ -3230,6 +3364,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
         layer.iw = newW; layer.ih = newH;
         layer.ix = sign.x>0 ? anchor.x : anchor.x-newW;
         layer.iy = sign.y>0 ? anchor.y : anchor.y-newH;
+        checkAndApplySnapHighlights(layer.ix, layer.iy, layer.iw, layer.ih);
         bumpImageLayer(sc, layer);
         renderStrokes();
         syncImageHandles();
@@ -3238,6 +3373,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
       };
       const up=()=>{
         imageDragging = false;
+        clearSnapHighlights();
         window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); window.removeEventListener('pointercancel',up);
         renderAll();
       };
@@ -3265,6 +3401,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
       const ref = selectedRef;
       if(!ref) return;
       refDragging = true;
+      startSnapSession();
       const startX=e.clientX, startY=e.clientY;
       const startW=ref.w, startH=ref.h;
       const aspect = startW/startH;
@@ -3283,11 +3420,13 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
         ref.y = sign.y>0 ? anchor.y : anchor.y-newH;
         ref.el.style.left = ref.x+'px'; ref.el.style.top = ref.y+'px';
         ref.el.style.width = ref.w+'px'; ref.el.style.height = ref.h+'px';
+        checkAndApplySnapHighlights(ref.x, ref.y, ref.w, ref.h);
         syncRefHandles();
         syncRefDeleteBtn();
       };
       const up=()=>{
         refDragging = false;
+        clearSnapHighlights();
         window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); window.removeEventListener('pointercancel',up);
       };
       window.addEventListener('pointermove',move);
@@ -3441,6 +3580,7 @@ thirdsSaveBtnEl.addEventListener('click', saveCurrentFrame);
   });
   resize();
   updateHistoryButtons();
+  window.addEventListener('blur', clearSnapHighlights);
 })();
 </script>
 </body>
