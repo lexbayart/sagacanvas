@@ -22,7 +22,7 @@
      so stage's own pointerdown/move/up keep firing exactly as before;
      only the browser's hit-test target changes, letting it fall through
      to whatever's actually underneath (a .refItem, or #world itself). */
-  #ghost,#front,#frontBelow,#frontAbove,#notes,#notesBelow,#notesAbove{position:absolute;left:0;top:0;pointer-events:none;}
+  #bg,#ghost,#front,#frontBelow,#frontAbove,#notes,#notesBelow,#notesAbove{position:absolute;left:0;top:0;pointer-events:none;}
   .frame{box-sizing:border-box;position:absolute;border:1px solid rgba(255,255,255,.65);box-shadow:0 8px 60px 12px rgba(0,0,0,.5);background:#f4f2ee;border-radius:var(--corner-r);}
   #thirdsGrid{position:absolute;inset:0;pointer-events:none;opacity:0;transition:opacity .15s ease;}
   #thirdsGrid.visible{opacity:1;}
@@ -217,6 +217,7 @@
 <body>
 <div id="stage">
   <div id="world">
+    <canvas id="bg"></canvas>
     <div id="refLayer"></div>
     <canvas id="ghost"></canvas>
     <canvas id="notesBelow"></canvas>
@@ -226,8 +227,8 @@
     <canvas id="frontBelow"></canvas>
     <canvas id="front"></canvas>
     <canvas id="frontAbove"></canvas>
+    <div id="layerRail"><div id="layerTrack"></div></div>
   </div>
-  <div id="layerRail"><div id="layerTrack"></div></div>
   <div class="ratioTag" id="ratioTag"></div>
   <div id="focusRing"></div>
   <div class="handleZone tl" data-corner="tl"><div class="handle"></div></div>
@@ -378,6 +379,11 @@
   const gsfCtx = groupScratchF.getContext('2d');
   const groupScratchN = document.createElement('canvas');
   const gsnCtx = groupScratchN.getContext('2d');
+  // background grid canvas: the very back layer of #world (below refLayer).
+  // Sized/positioned by ensureCanvasCoverage() like every other buffer so it
+  // tracks the camera window; drawGrid() paints onto it each render pass.
+  const bg = document.getElementById('bg');
+  const bctx = bg.getContext('2d');
   const frameBox = document.getElementById('frameBox');
   // frameBox's/stage's on-screen rect gets asked for by ~a dozen call
   // sites (focus/hover tracking, handles, ratio tag, filmstrip/rail
@@ -533,6 +539,55 @@
     viewZoom = fitZoomFor(frame.w, frame.h) * zoomMultiplier;
   }
   updateZoom();
+  // Grid spacing + opacity levels as a function of zoom. The coarse grid is a
+  // fixed multiple of the fine one; opacities ramp so the two levels trade off
+  // across the zoom range (each stays within [0, 0.5]).
+  const GRID = { fine: 40, coarse: 100, fineRamp: [1.6, 1.0], coarseRamp: [0.4, 0.8] };
+  function getGridLevels(viewZoom){
+    const ramp = (z,[a,b]) => Math.min(1, Math.max(0, (z-a)/(b-a)));
+    return {
+      fine:   { spacing: 80,          alpha: 0.05 * ramp(viewZoom, GRID.fineRamp) },
+      coarse: { spacing: 400,         alpha: 0.05 * ramp(viewZoom, GRID.coarseRamp) },
+    };
+  }
+  // ponytail: self-check — alphas stay within [0,0.5] and spacings are fixed
+  // across the zoom range. (Replaces an earlier exact-equality check that
+  // assumed a ramp shape getGridLevels() doesn't actually have.)
+  (function selfCheck(){
+    for(const z of [0.25,0.4,0.8,1.2,1.6,2.0,4.0]){
+      const g = getGridLevels(z);
+      if(g.fine.alpha<0 || g.fine.alpha>0.5)     throw new Error('fine alpha out of range @'+z);
+      if(g.coarse.alpha<0 || g.coarse.alpha>0.5) throw new Error('coarse alpha out of range @'+z);
+      if(g.fine.spacing!==80 || g.coarse.spacing!==400) throw new Error('spacing changed @'+z);
+    }
+  })();
+  // Paints the background grid onto the given 2d context (the #bg canvas
+  // buffer, in CSS-px coords already DPR-scaled by its own setTransform).
+  // Lines sit on world-space multiples of their spacing, offset by the buffer
+  // origin (canvasOriginX/Y) so they lock to fixed world positions and never
+  // shimmer as the camera pans/zooms — the whole buffer moves via the CSS
+  // transform instead. viewZoom picks the spacing/opacity tier; panX/panY are
+  // kept in the signature for stability but don't affect buffer-local placement.
+  function drawGrid(ctx, viewZoom, panX, panY, width, height){
+    if(width<=0 || height<=0) return;
+    const {fine, coarse} = getGridLevels(viewZoom);
+    ctx.clearRect(0,0,width,height);
+    const paint = (spacing, alpha)=>{
+      if(alpha<=0 || spacing<=0) return;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+      for(let k=Math.ceil(canvasOriginX/spacing); k*spacing-canvasOriginX<=width; k++){
+        const x = Math.floor(k*spacing - canvasOriginX) + 0.5; // ponytail: pixel-snap keeps 1px crisp at non-100% zoom
+        ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,height); ctx.stroke();
+      }
+      for(let j=Math.ceil(canvasOriginY/spacing); j*spacing-canvasOriginY<=height; j++){
+        const y = Math.floor(j*spacing - canvasOriginY) + 0.5; // ponytail: pixel-snap
+        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(width,y); ctx.stroke();
+      }
+    };
+    paint(coarse.spacing, coarse.alpha);
+    paint(fine.spacing, fine.alpha);
+  }
   // camera pan (screen px, applied outside the zoom scale so wheel-pan
   // distance feels the same regardless of current zoom level)
   let panX = 0, panY = -VERTICAL_BIAS;
@@ -1141,9 +1196,9 @@
     }
     canvasOriginX = minX - COVERAGE_PAD;
     canvasOriginY = minY - COVERAGE_PAD;
-    CW = Math.min(MAX_CANVAS_DIM, (maxX-minX) + COVERAGE_PAD*2);
-    CH = Math.min(MAX_CANVAS_DIM, (maxY-minY) + COVERAGE_PAD*2);
-    [ghost, front, frontBelow, frontAbove, notes, notesBelow, notesAbove, groupScratchF, groupScratchN].forEach(c=>{
+    CW = Math.max(MAX_CANVAS_DIM, (maxX-minX) + COVERAGE_PAD*2);
+    CH = Math.max(MAX_CANVAS_DIM, (maxY-minY) + COVERAGE_PAD*2);
+    [bg, ghost, front, frontBelow, frontAbove, notes, notesBelow, notesAbove, groupScratchF, groupScratchN].forEach(c=>{
       c.width = CW*DPR; c.height = CH*DPR;
       c.style.width = CW+'px'; c.style.height = CH+'px';
       c.style.left = canvasOriginX+'px'; c.style.top = canvasOriginY+'px';
@@ -1356,6 +1411,12 @@
     });
   }
   function renderAll(){
+    // background grid first — the #bg buffer is cleared+repainted here (it is
+    // not touched by renderStrokes/renderStaticLayers, which clear the ink
+    // buffers). Runs on every render pass: coverage realloc, resize, zoom,
+    // scene/layer switch, undo/redo/clear. Pure pan needs no redraw (the whole
+    // buffer, grid included, moves via the CSS transform).
+    drawGrid(bctx, viewZoom, panX, panY, CW, CH);
     renderStrokes();
     renderStaticLayers();
     renderFilmstrip();
@@ -2301,11 +2362,16 @@
   // anchors the rail directly right of the drawing window's live
   // on-screen rect, same trick as positionFilmstrip()
   function positionLayerRail(){
-    const r = getFrameBoxRect();
-    const sr = getStageRect();
-    layerRailEl.style.left = (r.right - sr.left + RAIL_GAP) + 'px';
-    layerRailEl.style.top = (r.top - sr.top) + 'px';
-    layerRailEl.style.height = r.height + 'px';
+    // #layerRail now lives INSIDE #world, so it's scaled by viewZoom along
+    // with everything else. frameRect() gives the frame in unscaled world
+    // coords (the same origin as the rail's own left/top, since both are
+    // direct children of #world), so expressing the rail in those units
+    // keeps it glued to the frame and scaling in sync. RAIL_GAP is a
+    // screen-px constant, so it's divided by viewZoom to read out as 10px.
+    const r = frameRect();
+    layerRailEl.style.left = (r.x + r.w + RAIL_GAP / viewZoom) + 'px';
+    layerRailEl.style.top = r.y + 'px';
+    layerRailEl.style.height = r.h + 'px';
     // see positionFilmstrip()'s own comment just above — same fix, same
     // reason: only the (cheap) position tracks the camera every tick,
     // the (expensive) content rebuild is coalesced via scheduleHeavyRerender().
